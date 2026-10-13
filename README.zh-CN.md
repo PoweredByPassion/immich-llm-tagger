@@ -52,6 +52,8 @@
 
 ### 第一步：克隆代码仓库并配置 `.env`
 
+镜像已在每次推送时自动构建并发布到 GHCR，因此你只需要 compose 文件和 `.env`，无需本地构建工具链（Python / Node / Tailwind）。
+
 ```bash
 git clone git@github.com:PoweredByPassion/immich-llm-tagger.git
 cd immich-llm-tagger
@@ -76,6 +78,8 @@ AUTH_PASSWORD=                                # 设置后启用访问密码（�
 > **提示（宿主机模型服务）**：如果你的大模型部署在宿主机（例如 7863 端口或 11434 端口的 Ollama），保留 `host.docker.internal` 可以让容器内顺利访问宿主机网络。
 
 ### 第二步：一键启动服务
+
+自动拉取预构建镜像 `ghcr.io/poweredbypassion/immich-llm-tagger:latest` 并启动容器：
 
 ```bash
 docker compose up -d
@@ -184,6 +188,12 @@ make css
 
 # 5. 运行全部单元测试 (790+ 自动化测试)
 pytest
+```
+
+如需从源码本地构建镜像（请使用下面完全一致的 tag，`docker compose up -d` 才会优先使用本地构建的镜像）：
+
+```bash
+docker build -t ghcr.io/poweredbypassion/immich-llm-tagger:latest .
 ```
 
 ---

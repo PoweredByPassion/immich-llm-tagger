@@ -52,6 +52,8 @@ Run a complete instance in **3 minutes** using Docker Compose.
 
 ### Step 1: Clone Repository & Create `.env`
 
+The image is prebuilt and published to GHCR on every push, so you only need the compose file and `.env` — no local build toolchain (Python / Node / Tailwind) required.
+
 ```bash
 git clone git@github.com:PoweredByPassion/immich-llm-tagger.git
 cd immich-llm-tagger
@@ -76,6 +78,8 @@ AUTH_PASSWORD=                                # Set to enable password auth (pub
 > **Note for Local LLM Services**: If your LLM service runs directly on your Docker host machine (e.g. port 7863 or 11434 for Ollama), keep `host.docker.internal` so the container can reach the host network.
 
 ### Step 2: Start Service
+
+Pulls the prebuilt image `ghcr.io/poweredbypassion/immich-llm-tagger:latest` and starts the container:
 
 ```bash
 docker compose up -d
@@ -184,6 +188,12 @@ make css
 
 # 5. Run test suite
 pytest
+```
+
+To build the Docker image from source instead of pulling the prebuilt one (tag it exactly as below so `docker compose up -d` picks up the local build):
+
+```bash
+docker build -t ghcr.io/poweredbypassion/immich-llm-tagger:latest .
 ```
 
 ---
