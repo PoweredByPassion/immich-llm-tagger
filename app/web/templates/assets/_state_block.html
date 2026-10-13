@@ -1,0 +1,60 @@
+<div class="rounded bg-[#13151c] border border-[#20232d] p-5">
+  <h2 class="mb-3 text-xs font-semibold uppercase tracking-wider text-zinc-400 font-mono">{{ tr("assets.state.title") }}</h2>
+  {% if state %}
+  <dl class="grid grid-cols-2 gap-x-6 gap-y-3 text-sm sm:grid-cols-4">
+    <div>
+      <dt class="text-xs text-zinc-400">{{ tr("assets.filter.current_tag") }}</dt>
+      <dd class="mt-1">
+        {% if state.current_tag %}
+        <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-mono bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">{{ state.current_tag }}</span>
+        {% else %}
+        <span class="text-xs text-zinc-500">{{ tr("assets.card.untagged") }}</span>
+        {% endif %}
+      </dd>
+    </div>
+    <div>
+      <dt class="text-xs text-zinc-400">{{ tr("assets.state.visibility") }}</dt>
+      <dd class="mt-1 text-zinc-200 font-mono text-xs">{{ state.visibility or tr("assets.state.unknown") }}</dd>
+    </div>
+    <div>
+      <dt class="text-xs text-zinc-400">{{ tr("assets.state.markers") }}</dt>
+      <dd class="mt-1 text-zinc-200 text-xs">
+        {% set markers = state.current_markers_list or [] %}
+        {% if markers %}
+        {{ markers | join(tr("common.list_sep")) }}
+        {% else %}
+        <span class="text-zinc-500">{{ tr("assets.detail.none") }}</span>
+        {% endif %}
+      </dd>
+    </div>
+    <div>
+      <dt class="text-xs text-zinc-400">{{ tr("assets.state.badges") }}</dt>
+      <dd class="mt-1 flex flex-wrap gap-1.5">
+        {% if state.manual_override %}
+        <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-mono bg-amber-500/10 text-amber-300 border border-amber-500/20">{{ tr("assets.state.manual_override") }}</span>
+        {% endif %}
+        {% if state.reviewed %}
+        <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-mono bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">{{ tr("common.reviewed") }}</span>
+        {% endif %}
+        {% if not state.manual_override and not state.reviewed %}
+        <span class="text-xs text-zinc-500">{{ tr("assets.detail.none") }}</span>
+        {% endif %}
+      </dd>
+    </div>
+    <div>
+      <dt class="text-xs text-zinc-400">{{ tr("assets.state.job") }}</dt>
+      <dd class="mt-1 text-zinc-200 text-xs font-mono">
+        {% if state.last_job_id and state_job_exists %}
+        <a href="/jobs/{{ state.last_job_id }}" class="text-[#5e6ad2] hover:underline">#{{ state.last_job_id }}</a>
+        {% elif state.last_job_id %}
+        <span class="text-zinc-500">{{ tr("assets.state.job_expired") }}</span>
+        {% else %}
+        <span class="text-zinc-500">{{ tr("assets.detail.none") }}</span>
+        {% endif %}
+      </dd>
+    </div>
+  </dl>
+  {% else %}
+  <p class="text-sm text-zinc-500">{{ tr("assets.state.empty") }}</p>
+  {% endif %}
+</div>

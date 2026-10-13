@@ -1,0 +1,21 @@
+{# 复核 / 取消改判结果：刷新状态块 + 按钮文案随 reviewed 切换 #}
+{% if ok %}
+<div class="rounded-[10px] border border-emerald-500/40 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-300">
+  {% if state and state.reviewed %}{{ tr("assets.review.marked") }}{% else %}{{ tr("assets.review.unmarked") }}{% endif %}
+</div>
+<div class="mt-4">
+  {% include "assets/_state_block.html" %}
+</div>
+<div class="mt-4">
+  <form hx-post="/assets/{{ asset_id }}/review" hx-target="#review-result" hx-swap="innerHTML">
+    <button type="submit"
+            class="rounded-[10px] border border-emerald-500/40 bg-emerald-500/10 px-4 py-2 text-sm font-medium text-emerald-300 hover:bg-emerald-500/20">
+      {% if state and state.reviewed %}{{ tr("assets.review.unmark") }}{% else %}{{ tr("assets.review.mark") }}{% endif %}
+    </button>
+  </form>
+</div>
+{% else %}
+<div class="rounded-[10px] border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+  {{ message }}
+</div>
+{% endif %}

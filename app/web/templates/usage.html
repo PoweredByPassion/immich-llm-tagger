@@ -1,0 +1,129 @@
+{% extends "base.html" %}
+{% block title %}{{ tr("nav.usage") }} - Immich LLM Tagger{% endblock %}
+{% block page_title %}{{ tr("nav.usage") }}{% endblock %}
+{% block content %}
+<div class="space-y-6">
+
+  <div>
+    <h1 class="text-xl font-semibold tracking-tight text-zinc-100">{{ tr("usage.heading") }}</h1>
+    <p class="text-xs text-zinc-400 mt-1">{{ tr("usage.desc") }}</p>
+  </div>
+
+  {% set has_data = totals.all.requests > 0 %}
+  {% if not has_data %}
+  <div class="rounded border border-dashed border-[#20232d] bg-[#13151c]/50 p-10 text-center text-sm text-zinc-500">
+    {{ tr("usage.empty") }}
+  </div>
+  {% else %}
+
+  <!-- 总计 KPI 4 卡矩阵 -->
+  <div class="grid grid-cols-2 gap-4 sm:grid-cols-4">
+    {% for label, t in [(tr("usage.kpi.today_requests"), totals.today.requests), (tr("usage.kpi.today_tokens"), totals.today.tokens), (tr("usage.kpi.total_requests"), totals.all.requests), (tr("usage.kpi.total_tokens"), totals.all.tokens)] %}
+    <div class="p-5 rounded bg-[#13151c] border border-[#20232d] hover:border-[#282c39] transition">
+      <p class="text-xs font-medium text-zinc-400">{{ label }}</p>
+      <p class="num mt-2 text-2xl font-semibold tabular-nums font-mono text-emerald-400" title="{{ t }}">{{ t | fmt_tokens }}</p>
+    </div>
+    {% endfor %}
+  </div>
+
+  <!-- 按天统计 -->
+  <section class="space-y-3">
+    <h2 class="text-xs font-semibold uppercase tracking-wider text-zinc-400 font-mono">{{ tr("usage.by_day") }}</h2>
+    <div class="rounded border border-[#20232d] bg-[#13151c] overflow-hidden">
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm text-left">
+          <thead class="bg-[#181b24]/80 text-zinc-400 font-mono text-xs border-b border-[#20232d]">
+            <tr>
+              <th class="py-3 px-4 font-medium">{{ tr("usage.th.date") }}</th>
+              <th class="py-3 px-4 font-medium">{{ tr("usage.th.requests") }}</th>
+              <th class="py-3 px-4 font-medium">Prompt</th>
+              <th class="py-3 px-4 font-medium">Completion</th>
+              <th class="py-3 px-4 font-medium">{{ tr("usage.th.tokens") }}</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-[#20232d]">
+            {% for r in by_day %}
+            <tr class="hover:bg-[#181b24]/50 transition">
+              <td class="num py-3.5 px-4 font-mono tabular-nums text-zinc-300">{{ r.day }}</td>
+              <td class="num py-3.5 px-4 font-mono tabular-nums text-zinc-300" title="{{ r.requests }}">{{ r.requests | fmt_tokens }}</td>
+              <td class="num py-3.5 px-4 font-mono tabular-nums text-zinc-400 text-xs" title="{{ r.prompt_tokens }}">{{ r.prompt_tokens | fmt_tokens }}</td>
+              <td class="num py-3.5 px-4 font-mono tabular-nums text-zinc-400 text-xs" title="{{ r.completion_tokens }}">{{ r.completion_tokens | fmt_tokens }}</td>
+              <td class="num py-3.5 px-4 font-mono tabular-nums text-emerald-400 font-medium" title="{{ r.tokens }}">{{ r.tokens | fmt_tokens }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- 按模型统计 -->
+  <section class="space-y-3">
+    <h2 class="text-xs font-semibold uppercase tracking-wider text-zinc-400 font-mono">{{ tr("usage.by_model") }}</h2>
+    <div class="rounded border border-[#20232d] bg-[#13151c] overflow-hidden">
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm text-left">
+          <thead class="bg-[#181b24]/80 text-zinc-400 font-mono text-xs border-b border-[#20232d]">
+            <tr>
+              <th class="py-3 px-4 font-medium">{{ tr("assets.detail.th.model") }}</th>
+              <th class="py-3 px-4 font-medium">{{ tr("usage.th.requests") }}</th>
+              <th class="py-3 px-4 font-medium">{{ tr("usage.th.tokens") }}</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-[#20232d]">
+            {% for r in by_model %}
+            <tr class="hover:bg-[#181b24]/50 transition">
+              <td class="py-3.5 px-4 text-zinc-200 font-mono text-xs">{{ r.model }}</td>
+              <td class="num py-3.5 px-4 font-mono tabular-nums text-zinc-300" title="{{ r.requests }}">{{ r.requests | fmt_tokens }}</td>
+              <td class="num py-3.5 px-4 font-mono tabular-nums text-emerald-400 font-medium" title="{{ r.tokens }}">{{ r.tokens | fmt_tokens }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- 按 Job 统计 -->
+  <section class="space-y-3">
+    <h2 class="text-xs font-semibold uppercase tracking-wider text-zinc-400 font-mono">{{ tr("usage.by_job") }}</h2>
+    <div class="rounded border border-[#20232d] bg-[#13151c] overflow-hidden">
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm text-left">
+          <thead class="bg-[#181b24]/80 text-zinc-400 font-mono text-xs border-b border-[#20232d]">
+            <tr>
+              <th class="py-3 px-4 font-medium">Job</th>
+              <th class="py-3 px-4 font-medium">{{ tr("common.type") }}</th>
+              <th class="py-3 px-4 font-medium">{{ tr("common.status") }}</th>
+              <th class="py-3 px-4 font-medium">{{ tr("usage.th.requests") }}</th>
+              <th class="py-3 px-4 font-medium">{{ tr("usage.th.tokens") }}</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-[#20232d]">
+            {% for r in by_job %}
+            <tr class="hover:bg-[#181b24]/50 transition">
+              <td class="num py-3.5 px-4 font-mono tabular-nums text-zinc-300">
+                {% if r.job_id and r.job_id in existing_job_ids %}
+                <a href="/jobs/{{ r.job_id }}" class="text-[#5e6ad2] hover:underline font-medium">#{{ r.job_id }}</a>
+                {% elif r.job_id %}
+                <span class="text-zinc-500">{{ tr("usage.expired") }}</span>
+                {% else %}
+                <span class="text-zinc-500">{{ tr("usage.no_job") }}</span>
+                {% endif %}
+              </td>
+              <td class="py-3.5 px-4 text-zinc-300">{{ r.type if r.type else '' }}</td>
+              <td class="py-3.5 px-4 text-zinc-300">{{ r.status if r.status else '' }}</td>
+              <td class="num py-3.5 px-4 font-mono tabular-nums text-zinc-300" title="{{ r.requests }}">{{ r.requests | fmt_tokens }}</td>
+              <td class="num py-3.5 px-4 font-mono tabular-nums text-emerald-400 font-medium" title="{{ r.tokens }}">{{ r.tokens | fmt_tokens }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  {% endif %}
+
+</div>
+{% endblock %}

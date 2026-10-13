@@ -1,0 +1,16 @@
+.git
+.venv
+data
+bin
+docs
+.superpowers
+__pycache__
+*.pyc
+.pytest_cache
+*.egg-info
+dist
+build
+htmlcov
+.coverage
+app/clients/_immich_gen
+app/web/static/tailwind.css

@@ -1,0 +1,12 @@
+{% if ok %}
+<div class="rounded-[10px] border border-emerald-500/40 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-300">
+  {{ tr("assets.sync.done") }}
+</div>
+<div class="mt-4">
+  {% include "assets/_state_block.html" %}
+</div>
+{% else %}
+<div class="rounded-[10px] border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+  {{ message }}
+</div>
+{% endif %}

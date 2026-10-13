@@ -1,0 +1,158 @@
+{% extends "base.html" %}
+{% block title %}{{ tr("config.nav.markers") }} - Immich LLM Tagger{% endblock %}
+{% block page_title %}{{ tr("config.nav.markers") }}{% endblock %}
+{% block content %}
+<div class="space-y-6">
+  {% include "config/_tabs.html" %}
+
+  <div>
+    <h1 class="text-xl font-semibold tracking-tight text-[#f1f3f9]">{{ tr("config.markers.title") }}</h1>
+    <p class="text-xs text-zinc-400 mt-1">{{ tr("config.markers.desc") }}</p>
+  </div>
+
+  {% if error %}
+  <div class="rounded-[6px] border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-xs text-rose-300">
+    {{ error }}
+  </div>
+  {% endif %}
+
+  <!-- 规则说明卡片 -->
+  <div class="card p-4 text-xs text-[#8a8f98] leading-relaxed">
+    <p>{{ tr("config.markers.rule_desc_1") }}<strong class="text-[#f1f3f9] font-medium">{{ tr("config.markers.rule_below") }}</strong>{{ tr("config.markers.rule_desc_2") }}</p>
+  </div>
+
+  <!-- Marker 规则列表 -->
+  {% if rules %}
+  <div class="card overflow-hidden">
+    <div class="overflow-x-auto">
+      <table class="table-compact">
+        <thead>
+          <tr>
+            <th>{{ tr("config.markers.tag_label") }}</th>
+            <th>{{ tr("config.markers.condition") }}</th>
+            <th class="w-32">{{ tr("common.status") }}</th>
+            <th class="w-24 text-right">{{ tr("common.actions") }}</th>
+          </tr>
+        </thead>
+        <tbody id="marker-rows" class="divide-y divide-[#20232d]">
+          {% for r in rules %}
+          <tr class="hover:bg-[#181b24]/50 transition">
+            <td class="font-medium text-xs text-[#f1f3f9]">
+              {{ r["row"]["tag_name"] or ("#" ~ r["row"]["marker_tag_id"]) }}
+            </td>
+            <td class="num font-mono text-xs text-[#8a8f98]">
+              confidence &lt; {{ r["confidence_lt"] }}
+            </td>
+            <td>
+              <form method="post" action="/config/markers/{{ r['row']['id'] }}/toggle" class="inline">
+                <button type="submit"
+                        class="pill {% if r['row']['enabled'] %}pill-success{% else %}pill-neutral{% endif %} cursor-pointer hover:opacity-80 transition">
+                  {% if r["row"]["enabled"] %}{{ tr("config.common.enabled") }}{% else %}{{ tr("config.common.disabled") }}{% endif %}
+                </button>
+              </form>
+            </td>
+            <td class="text-right" x-data="{ confirmOpen: false }">
+              <button type="button" @click="confirmOpen = true"
+                      class="btn btn-ghost text-rose-400 hover:text-rose-300 text-xs h-7 px-2">
+                {{ tr("config.common.delete") }}
+              </button>
+              <!-- 删除确认模态窗 -->
+              <div x-show="confirmOpen" x-cloak
+                   class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm px-4"
+                   role="dialog" aria-modal="true">
+                <div class="w-full max-w-sm rounded-[6px] border border-[#20232d] bg-[#13151c] p-6 shadow-2xl text-left">
+                  <h2 class="mb-2 text-sm font-semibold text-[#f1f3f9]">{{ tr("config.markers.delete_title") }}</h2>
+                  <p class="mb-5 text-xs text-[#8a8f98] leading-relaxed">{{ tr("config.markers.delete_confirm") }}</p>
+                  <div class="flex justify-end gap-2">
+                    <button type="button" @click="confirmOpen = false"
+                            class="btn btn-secondary text-xs h-8 px-3">
+                      {{ tr("config.common.cancel") }}
+                    </button>
+                    <form method="post" action="/config/markers/{{ r['row']['id'] }}/delete" class="inline">
+                      <button type="submit"
+                              class="btn btn-danger bg-red-500 hover:bg-red-400 text-xs h-8 px-3">
+                        {{ tr("config.common.delete") }}
+                      </button>
+                    </form>
+                  </div>
+                </div>
+              </div>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% else %}
+  <div class="card p-8 text-center text-xs text-[#8a8f98]">
+    <div class="w-10 h-10 rounded-[6px] bg-[#181b24] border border-[#20232d] flex items-center justify-center mx-auto mb-3 text-zinc-400">
+      <svg class="w-5 h-5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+      </svg>
+    </div>
+    <p class="text-sm font-medium text-[#f1f3f9] mb-1">{{ tr("config.markers.empty_title") }}</p>
+    <p class="max-w-md mx-auto leading-relaxed">{{ tr("config.markers.empty_desc") }}</p>
+  </div>
+  {% endif %}
+
+  <!-- 新增规则卡片 -->
+  <div class="card p-6 space-y-4">
+    <div>
+      <h2 class="text-sm font-semibold text-[#f1f3f9]">{{ tr("config.common.add_rule") }}</h2>
+      <p class="text-xs text-[#8a8f98] mt-0.5">{{ tr("config.markers.add_desc") }}</p>
+    </div>
+
+    <form method="post" action="/config/markers" class="flex flex-wrap items-end gap-3.5">
+      <div class="w-56">
+        <label for="marker_tag_id" class="mb-1.5 block text-xs font-medium text-[#8a8f98]">{{ tr("config.markers.tag_label") }}</label>
+        <select id="marker_tag_id" name="marker_tag_id" class="input w-full">
+          {% for t in marker_tags %}
+          <option value="{{ t.id }}">{{ t.name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="w-44">
+        <label for="confidence_lt" class="mb-1.5 block text-xs font-medium text-[#8a8f98]">{{ tr("config.markers.below_label") }}</label>
+        <input type="number" step="0.01" min="0" max="1" id="confidence_lt" name="confidence_lt"
+               placeholder="0.8"
+               class="input w-full num">
+      </div>
+      <button type="submit" class="btn btn-primary text-xs h-9 px-4 flex-shrink-0">
+        {{ tr("config.common.add") }}
+      </button>
+    </form>
+  </div>
+
+  <!-- 修改规则卡片 -->
+  {% if rules %}
+  <div class="space-y-3 pt-2">
+    <h2 class="text-sm font-semibold text-[#f1f3f9]">{{ tr("config.markers.edit_title") }}</h2>
+    <div class="space-y-3">
+      {% for r in rules %}
+      <form method="post" action="/config/markers/{{ r['row']['id'] }}/update"
+            class="card p-5 flex flex-wrap items-end gap-3.5">
+        <div class="w-56">
+          <label for="tag-{{ r['row']['id'] }}" class="mb-1.5 block text-xs font-medium text-[#8a8f98]">{{ tr("config.markers.tag_label") }}</label>
+          <select id="tag-{{ r['row']['id'] }}" name="marker_tag_id" class="input w-full">
+            {% for t in marker_tags %}
+            <option value="{{ t.id }}" {% if t.id == r['row']['marker_tag_id'] %}selected{% endif %}>{{ t.name }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="w-44">
+          <label for="conf-{{ r['row']['id'] }}" class="mb-1.5 block text-xs font-medium text-[#8a8f98]">{{ tr("config.markers.below_label") }}</label>
+          <input type="number" step="0.01" min="0" max="1" id="conf-{{ r['row']['id'] }}"
+                 name="confidence_lt" value="{{ r['confidence_lt'] }}"
+                 class="input w-full num">
+        </div>
+        <button type="submit" class="btn btn-secondary text-xs h-9 px-4">
+          {{ tr("config.common.save") }}
+        </button>
+      </form>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,25 @@
+services:
+  immich-llm-tagger:
+    build:
+      context: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data
+    # 让容器能用 host.docker.internal 访问宿主机。
+    # Linux 上 Docker 默认**不**注入这个名字，必须显式映射到宿主机网桥地址。
+    #
+    # 为什么需要：LLM / Immich 若跑在宿主机上（例如 http://127.0.0.1:7863），
+    # 容器里**必须**写 http://host.docker.internal:7863。
+    # 写 127.0.0.1 会打到容器自己 —— 表现为 `[Errno 111] Connection refused`。
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      IMMICH_URL: ${IMMICH_URL:-}
+      IMMICH_API_KEY: ${IMMICH_API_KEY:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      # 公网部署时启用单密码访问认证；留空则完全旁路（本地零摩擦）。
+      AUTH_PASSWORD: ${AUTH_PASSWORD:-}
+    restart: unless-stopped

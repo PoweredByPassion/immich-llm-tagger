@@ -1,0 +1,152 @@
+{% extends "base.html" %}
+{% block title %}{{ tr("nav.assets") }} - Immich LLM Tagger{% endblock %}
+{% block page_title %}{{ tr("nav.assets") }}{% endblock %}
+{% block content %}
+<div class="space-y-6">
+
+  <!-- 顶部标题与说明 -->
+  <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+    <div>
+      <h1 class="text-xl font-semibold tracking-tight text-[#f1f3f9]">{{ tr("assets.list.title") }}</h1>
+      <p class="text-xs text-zinc-400 mt-1">{{ tr("assets.list.desc") }}</p>
+    </div>
+  </div>
+
+  <!-- 筛选工具栏 (表单尺寸升级至 14px 舒适标准) -->
+  <form method="get" action="/assets" class="p-5 rounded bg-[#13151c] border border-[#20232d] flex flex-wrap items-end gap-4 text-sm">
+    <div>
+      <label for="status" class="mb-1.5 block text-xs font-medium text-zinc-300">{{ tr("common.status") }}</label>
+      <select id="status" name="status"
+              class="rounded bg-[#181b24] border border-[#20232d] px-3.5 py-2.5 text-sm text-zinc-100 outline-none focus:border-[#5e6ad2]">
+        <option value="">{{ tr("assets.filter.all") }}</option>
+        {% for s in ["ok", "refused", "error"] %}
+        <option value="{{ s }}" {% if f_status == s %}selected{% endif %}>{{ s }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div>
+      <label for="current_tag" class="mb-1.5 block text-xs font-medium text-zinc-300">{{ tr("assets.filter.current_tag") }}</label>
+      <select id="current_tag" name="current_tag"
+              class="rounded bg-[#181b24] border border-[#20232d] px-3.5 py-2.5 text-sm text-zinc-100 outline-none focus:border-[#5e6ad2]">
+        <option value="">{{ tr("assets.filter.all") }}</option>
+        {% for name in tag_names %}
+        <option value="{{ name }}" {% if f_current_tag == name %}selected{% endif %}>{{ name }}{% if tag_counts.get(name) %}（{{ tag_counts.get(name) }}）{% endif %}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div>
+      <label for="source" class="mb-1.5 block text-xs font-medium text-zinc-300">{{ tr("jobs.detail.th.source") }}</label>
+      <select id="source" name="source"
+              class="rounded bg-[#181b24] border border-[#20232d] px-3.5 py-2.5 text-sm text-zinc-100 outline-none focus:border-[#5e6ad2]">
+        <option value="">{{ tr("assets.filter.all") }}</option>
+        {% for s in sources %}
+        <option value="{{ s }}" {% if f_source == s %}selected{% endif %}>{{ s }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div>
+      <label for="dry_run" class="mb-1.5 block text-xs font-medium text-zinc-300">{{ tr("common.type") }}</label>
+      <select id="dry_run" name="dry_run"
+              class="rounded bg-[#181b24] border border-[#20232d] px-3.5 py-2.5 text-sm text-zinc-100 outline-none focus:border-[#5e6ad2]">
+        <option value="">{{ tr("assets.filter.all") }}</option>
+        <option value="0" {% if f_dry_run == "0" %}selected{% endif %}>{{ tr("assets.filter.official") }}</option>
+        <option value="1" {% if f_dry_run == "1" %}selected{% endif %}>{{ tr("common.sandbox") }}</option>
+      </select>
+    </div>
+    <div>
+      <label for="job_id" class="mb-1.5 block text-xs font-medium text-zinc-300">{{ tr("overview.recent.th.id") }}</label>
+      <input type="text" id="job_id" name="job_id" value="{{ f_job_id }}"
+             class="w-28 rounded bg-[#181b24] border border-[#20232d] px-3.5 py-2.5 text-sm text-zinc-100 font-mono outline-none focus:border-[#5e6ad2]">
+    </div>
+    <div class="flex items-center gap-3">
+      <button type="submit"
+              class="px-5 py-2.5 rounded bg-[#5e6ad2] hover:bg-[#6f7be8] active:scale-[0.98] text-sm font-medium text-white transition shadow-sm">
+        {{ tr("assets.filter.submit") }}
+      </button>
+      <a href="/assets" class="py-2.5 px-2 text-sm text-zinc-400 hover:text-white transition">{{ tr("assets.filter.reset") }}</a>
+    </div>
+  </form>
+
+  <!-- 图片卡片网格布局 -->
+  {% if records %}
+  <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
+    {% for r in records %}
+    <div class="p-5 rounded bg-[#13151c] border border-[#20232d] hover:border-[#282c39] transition space-y-4">
+      <div class="flex items-start gap-4">
+        <!-- 缩略图：真实缩略图，失败回落占位图标 -->
+        <div class="w-20 h-20 rounded bg-[#181b24] flex-shrink-0 overflow-hidden relative border border-[#20232d] flex items-center justify-center text-zinc-500">
+          <img src="/assets/{{ r.asset_id }}/thumb" alt="" loading="lazy"
+               class="w-full h-full object-cover"
+               onerror="this.classList.add('hidden');this.nextElementSibling.classList.remove('hidden');">
+          <svg class="w-10 h-10 text-zinc-500 hidden" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+          </svg>
+        </div>
+
+        <!-- 资产信息 -->
+        <div class="flex-1 min-w-0">
+          <a href="/assets/{{ r.asset_id }}" class="text-sm font-semibold text-zinc-100 hover:text-[#5e6ad2] truncate block" title="{{ r.asset_id }}">
+            {{ r.filename or "#" ~ r.asset_id[:8] }}
+          </a>
+          <div class="text-xs text-zinc-400 font-mono mt-1 truncate">
+            {{ tr("assets.card.source_prefix") }} {{ r.source }} · <span data-utc="{{ r.created_at }}">{{ r.created_at }}</span>
+            {% if r.dry_run %}
+            <span class="ml-1 inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-mono bg-[#5e6ad2]/20 text-[#6f7be8] border border-[#5e6ad2]/30" title="{{ tr('assets.card.sandbox_title') }}">{{ tr("common.sandbox") }}</span>
+            {% endif %}
+          </div>
+          
+          <!-- 标签胶囊 -->
+          <div class="flex flex-wrap gap-1.5 mt-2.5">
+            {% if r.current_tag %}
+            <span class="px-2 py-0.5 rounded bg-[#181b24] text-zinc-200 text-xs border border-[#20232d] font-medium">{{ r.current_tag }}</span>
+            {% else %}
+            <span class="px-2 py-0.5 rounded bg-[#181b24] text-zinc-500 text-xs border border-[#20232d]">{{ tr("assets.card.untagged") }}</span>
+            {% endif %}
+
+            {% if r.visibility and r.visibility != 'timeline' %}
+            <span class="px-2 py-0.5 rounded bg-[#181b24] text-zinc-400 text-xs border border-[#20232d]">{{ r.visibility }}</span>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+
+      <!-- 底部置信度与操作 -->
+      <div class="pt-3 border-t border-[#20232d] flex items-center justify-between text-sm">
+        <div>
+          {% if r.confidence is not none %}
+          <span class="text-emerald-400 font-mono text-xs font-medium">{{ tr("assets.card.confidence") % ("%.2f"|format(r.confidence)) }}</span>
+          {% else %}
+          <span class="text-zinc-500 font-mono text-xs">{{ tr("assets.card.no_confidence") }}</span>
+          {% endif %}
+        </div>
+        <a href="/assets/{{ r.asset_id }}" class="text-[#5e6ad2] hover:underline text-sm font-medium">
+          {{ tr("assets.card.view") }} &rarr;
+        </a>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+
+  <!-- 分页栏 -->
+  <div class="flex items-center justify-between text-sm pt-2">
+    <span class="num text-zinc-400 font-mono text-xs">{{ tr("jobs.page.summary") % (total, page, pages) }}</span>
+    <div class="flex gap-2.5">
+      {% if has_prev %}
+      <a href="/assets?{{ request.query_params }}&page={{ page - 1 }}"
+         class="px-4 py-2 rounded bg-[#181b24] hover:bg-[#202430] border border-[#20232d] text-sm text-zinc-200 transition font-medium">{{ tr("jobs.page.prev") }}</a>
+      {% endif %}
+      {% if has_next %}
+      <a href="/assets?{{ request.query_params }}&page={{ page + 1 }}"
+         class="px-4 py-2 rounded bg-[#181b24] hover:bg-[#202430] border border-[#20232d] text-sm text-zinc-200 transition font-medium">{{ tr("jobs.page.next") }}</a>
+      {% endif %}
+    </div>
+  </div>
+  {% else %}
+  <div class="rounded border border-dashed border-[#20232d] bg-[#13151c]/50 p-10 text-center">
+    <p class="text-sm font-medium text-zinc-300">{{ tr("assets.empty.title") }}</p>
+    <p class="mt-1 text-xs text-zinc-500">{{ tr("assets.empty.desc") }}</p>
+  </div>
+  {% endif %}
+
+</div>
+{% endblock %}

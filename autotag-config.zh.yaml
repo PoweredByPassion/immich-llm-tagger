@@ -1,0 +1,122 @@
+settings:
+  queue_tag_name: "未分类"
+  fallback_tag_name: "其他"
+  default_min_confidence: 0.8
+  thumb_preset: "large"
+  thumb_quality: 85
+  poll_enabled: true
+  poll_interval_seconds: 300
+  webhook_enabled: true
+  record_retention_days: 90
+
+tags:
+  - name: "截图"
+    description: "手机、平板或电脑屏幕截屏，包括微信/QQ等社交聊天记录、网页截屏、地图导航、支付界面、系统设置、应用界面、游戏画面。"
+    kind: "primary"
+    archive: true
+    album: null
+    min_confidence: 0.8
+    enabled: true
+
+  - name: "文档"
+    description: "拍摄或扫描的书面文件与纸质票据，包括发票、报销单据、合同、收据、表格、白板笔记、便签、书本教材页面、PPT投影、使用说明。"
+    kind: "primary"
+    archive: false
+    album: "文档资料"
+    min_confidence: 0.75
+    enabled: true
+
+  - name: "证件"
+    description: "个人身份、金融与官方资质凭证，包括居民身份证、护照、驾驶证、行驶证、银行卡、社保卡、营业执照、证书、门禁卡、名片。"
+    kind: "primary"
+    archive: false
+    album: "证件凭据"
+    min_confidence: 0.85
+    enabled: true
+
+  - name: "表情包"
+    description: "网络表情包、搞笑梗图、社交斗图图片，通常带有夸张文字、低画质网图、二次创作插画、搞笑配字图。"
+    kind: "primary"
+    archive: true
+    album: null
+    min_confidence: 0.8
+    enabled: true
+
+  - name: "杂图"
+    description: "无个人纪念价值的临时/广告图像，包括电商广告海报、商品图、应用图标、Logo、壁纸、偶发误触拍摄的模糊废片、镜头遮挡黑白图。"
+    kind: "primary"
+    archive: true
+    album: null
+    min_confidence: 0.85
+    enabled: true
+
+  - name: "生活照片"
+    description: "日常用相机或手机镜头真实拍摄的普通生活照片，包括人物合影、自拍、旅行风景、美食打卡、宠物记录、家庭日常生活。"
+    kind: "primary"
+    archive: false
+    album: null
+    min_confidence: 0.7
+    skip_immich: true
+    enabled: true
+
+  - name: "其他"
+    description: "无法确切归入上述任何类别的其他图片，或主体不明确、多元素复合难以单一定义的图像。"
+    kind: "primary"
+    archive: false
+    album: null
+    min_confidence: null
+    enabled: true
+
+  - name: "敏感隐私"
+    description: "包含身份证件、银行卡、密码私密信息、医疗或财务记录等敏感内容。"
+    kind: "marker"
+    archive: false
+    album: null
+    min_confidence: null
+    enabled: true
+
+  - name: "低置信度"
+    description: "模型判断置信度低于阈值，保留在时间线供人工复核。"
+    kind: "marker"
+    archive: false
+    album: null
+    min_confidence: null
+    enabled: true
+
+  - name: "待复核"
+    description: "模型预测置信度极低，建议人工重新分类。"
+    kind: "marker"
+    archive: false
+    album: null
+    min_confidence: null
+    enabled: true
+
+marker_rules:
+  - tag_name: "低置信度"
+    condition:
+      confidence_lt: 0.8
+    enabled: true
+  - tag_name: "待复核"
+    condition:
+      confidence_lt: 0.5
+    enabled: true
+
+scope_rules: []
+exclusions: []
+
+prompt_versions:
+  - body: |
+      你是一个个人相册分类助手。请根据下方标签定义，为图片选择最合适的一个标签。仅回复纯 JSON 对象，不要输出任何推理散文或 markdown 围栏。
+
+      可选标签列表：
+      {{TAG_LIST}}
+
+      文件名：{{FILENAME}}
+      拍摄日期：{{DATE}}
+
+      必须严格按以下 JSON 结构输出：
+      {"tag":"<标签名称>","confidence":<0.0-1.0>,"sensitive":<true|false>,"reason":"<简短理由,不超过8个字>"}
+
+      当图片包含身份证件、银行卡、密码、私密聊天、病历或财务账单时，必须将 sensitive 设为 true。即使内容敏感也必须输出 JSON，不要拒绝回答。若不符合任何具体类别，请使用兜底标签。
+    note: "中文默认多模态视觉分类 Prompt"
+    created_at: "2026-10-12T00:00:00"

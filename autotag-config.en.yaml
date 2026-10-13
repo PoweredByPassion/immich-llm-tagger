@@ -1,0 +1,124 @@
+settings:
+  queue_tag_name: "unclassified"
+  fallback_tag_name: "other"
+  default_min_confidence: 0.8
+  thumb_preset: "large"
+  thumb_quality: 85
+  poll_enabled: true
+  poll_interval_seconds: 300
+  webhook_enabled: true
+  record_retention_days: 90
+
+tags:
+  - name: "screenshot"
+    description: "Capture of a device screen (phone, tablet, computer) - chat, web page, map, payment/QR, system UI, settings, app UI, game HUD."
+    kind: "primary"
+    archive: true
+    album: null
+    min_confidence: 0.8
+    enabled: true
+
+  - name: "document"
+    description: "Photographed or scanned document - receipt, invoice, contract, form, whiteboard, handwritten note, book page, slide, table."
+    kind: "primary"
+    archive: false
+    album: "Documents"
+    min_confidence: 0.75
+    enabled: true
+
+  - name: "id_document"
+    description: "Identity, financial, or legal document - ID card, passport, driving licence, bank/credit card, business card, certificate."
+    kind: "primary"
+    archive: false
+    album: "ID Documents"
+    min_confidence: 0.85
+    enabled: true
+
+  - name: "meme"
+    description: "Internet meme or reaction image, often with bold overlay text, sticker, comic, or funny caption."
+    kind: "primary"
+    archive: true
+    album: null
+    min_confidence: 0.8
+    enabled: true
+
+  - name: "junk"
+    description: "Unimportant downloaded/saved graphic with no personal value - product shot, advertisement, poster, wallpaper, sticker, icon, logo, blurry accident."
+    kind: "primary"
+    archive: true
+    album: null
+    min_confidence: 0.85
+    enabled: true
+
+  - name: "normal_photo"
+    description: "Ordinary photograph taken with a camera - people, portraits, places, food, pets, travel, scenery, daily life."
+    kind: "primary"
+    archive: false
+    album: null
+    min_confidence: 0.7
+    skip_immich: true
+    enabled: true
+
+  - name: "other"
+    description: "None of the above or ambiguous multi-element images."
+    kind: "primary"
+    archive: false
+    album: null
+    min_confidence: null
+    enabled: true
+
+  - name: "sensitive"
+    description: "Sensitive privacy content (identity cards, bank cards, passwords, medical/financial records)."
+    kind: "marker"
+    archive: false
+    album: null
+    min_confidence: null
+    enabled: true
+
+  - name: "low_confidence"
+    description: "Model confidence is below threshold; retained in timeline for manual review."
+    kind: "marker"
+    archive: false
+    album: null
+    min_confidence: null
+    enabled: true
+
+  - name: "needs_review"
+    description: "Model confidence is very low; review recommended."
+    kind: "marker"
+    archive: false
+    album: null
+    min_confidence: null
+    enabled: true
+
+marker_rules:
+  - tag_name: "low_confidence"
+    condition:
+      confidence_lt: 0.8
+    enabled: true
+  - tag_name: "needs_review"
+    condition:
+      confidence_lt: 0.5
+    enabled: true
+
+scope_rules: []
+exclusions: []
+
+prompt_versions:
+  - body: |
+      You are classifying ONE image from a personal photo library. Reply with ONLY a JSON object, no prose, no markdown fences.
+
+      Pick exactly one tag from the list below:
+      {{TAG_LIST}}
+
+      File: {{FILENAME}}
+      Date: {{DATE}}
+
+      Output exactly this JSON shape:
+      {"tag":"<one of the primary tags>","confidence":<0.0-1.0>,"sensitive":<true|false>,"reason":"<at most 8 words>"}
+
+      "sensitive" = identity documents, bank cards, passwords, private messages, medical or financial records.
+      Always output the JSON object, even for sensitive or private images - just set sensitive to true. Never refuse or apologise.
+      If none fits, use the fallback tag.
+    note: "Default English multimodal vision prompt version"
+    created_at: "2026-10-12T00:00:00"

@@ -1,0 +1,120 @@
+{% extends "base.html" %}
+{% block title %}{{ tr("nav.jobs") }} - Immich LLM Tagger{% endblock %}
+{% block page_title %}{{ tr("nav.jobs") }}{% endblock %}
+{% block content %}
+<div class="space-y-6">
+
+  <!-- 全局轮询开关控制卡片 -->
+  <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-5 rounded bg-[#13151c] border border-[#20232d]">
+    <div>
+      <h2 class="text-base font-semibold text-zinc-100">{{ tr("jobs.poll.title") }}</h2>
+      <p class="text-sm text-zinc-400 mt-0.5">{{ tr("jobs.poll.desc") }}</p>
+    </div>
+    <form method="post" action="/jobs/pause" class="flex items-center gap-3">
+      {% if poll_enabled %}
+      <input type="hidden" name="pause" value="1">
+      <button type="submit" 
+              class="px-4 py-2 rounded bg-amber-500/10 hover:bg-amber-500/20 active:scale-[0.98] border border-amber-500/30 text-sm font-medium text-amber-300 transition">
+        {{ tr("jobs.poll.pause") }}
+      </button>
+      <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-mono font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+        <span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span> {{ tr("jobs.status.running") }}
+      </span>
+      {% else %}
+      <button type="submit" 
+              class="px-4 py-2 rounded bg-emerald-500 hover:bg-emerald-400 active:scale-[0.98] text-sm font-medium text-zinc-950 transition">
+        {{ tr("jobs.poll.resume") }}
+      </button>
+      <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-mono font-medium bg-amber-500/10 text-amber-300 border border-amber-500/20">
+        <span class="w-1.5 h-1.5 rounded-full bg-amber-400"></span> {{ tr("jobs.status.paused") }}
+      </span>
+      {% endif %}
+    </form>
+  </div>
+
+  <!-- 任务列表表格 -->
+  {% if jobs %}
+  <div class="rounded border border-[#20232d] bg-[#13151c] overflow-hidden">
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm text-left">
+        <thead class="bg-[#181b24]/80 text-zinc-400 font-mono text-xs border-b border-[#20232d]">
+          <tr>
+            <th class="py-3 px-4 font-medium">ID</th>
+            <th class="py-3 px-4 font-medium">{{ tr("common.type") }}</th>
+            <th class="py-3 px-4 font-medium">{{ tr("common.status") }}</th>
+            <th class="py-3 px-4 font-medium">{{ tr("jobs.th.time") }}</th>
+            <th class="py-3 px-4 font-medium">{{ tr("jobs.th.progress") }}</th>
+            <th class="py-3 px-4 font-medium">{{ tr("jobs.th.failed") }}</th>
+            <th class="py-3 px-4 font-medium">{{ tr("jobs.th.duration") }}</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-[#20232d]">
+          {% for j in jobs %}
+          <tr class="hover:bg-[#181b24]/50 transition">
+            <td class="num py-3.5 px-4 font-mono tabular-nums">
+              <a href="/jobs/{{ j.id }}" class="text-[#5e6ad2] hover:underline font-medium">#{{ j.id }}</a>
+            </td>
+            <td class="py-3.5 px-4">
+              <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-mono {% if j.type in ('scan', 'single', 'dryrun') %}{{ {'scan': 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300', 'single': 'border-sky-500/30 bg-sky-500/10 text-sky-300', 'dryrun': 'border-amber-500/30 bg-amber-500/10 text-amber-300'}[j.type] }}{% else %}border-[#20232d] bg-[#181b24] text-zinc-300{% endif %} border">
+                {{ j.type }}
+              </span>
+            </td>
+            <td class="py-3.5 px-4">
+              <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded text-xs font-mono font-medium border
+                {% if j.status == 'running' %}border-sky-500/30 bg-sky-500/10 text-sky-300
+                {% elif j.status == 'queued' %}border-amber-500/30 bg-amber-500/10 text-amber-300
+                {% elif j.status == 'done' %}border-emerald-500/30 bg-emerald-500/10 text-emerald-300
+                {% elif j.status == 'failed' %}border-rose-500/30 bg-rose-500/10 text-rose-300
+                {% elif j.status == 'canceled' %}border-zinc-600 bg-zinc-800 text-zinc-400
+                {% else %}border-[#20232d] bg-[#181b24] text-zinc-300{% endif %}">
+                {{ j.status }}
+              </span>
+            </td>
+            <td class="num py-3.5 px-4 font-mono tabular-nums text-zinc-400 text-xs">
+              {% if j.started_at %}<span data-utc="{{ j.started_at }}">{{ j.started_at }}</span>{% else %}—{% endif %}
+            </td>
+            <td class="py-3.5 px-4">
+              <div class="flex items-center gap-3">
+                <div class="h-2 w-28 overflow-hidden rounded bg-[#202430]">
+                  <div class="h-full bg-[#5e6ad2] rounded" style="width: {{ (j.done / j.total * 100) | round | int if j.total > 0 else 0 }}%"></div>
+                </div>
+                <span class="num font-mono tabular-nums text-zinc-300 text-xs">{{ j.done }}/{{ j.total }}</span>
+              </div>
+            </td>
+            <td class="num py-3.5 px-4 font-mono tabular-nums {% if j.failed %}text-rose-400 font-medium{% else %}text-zinc-500{% endif %}">
+              {{ j.failed }}
+            </td>
+            <td class="num py-3.5 px-4 font-mono tabular-nums text-zinc-300 text-xs">
+              {% if j.finished_at %}{{ job_duration(j) }}{% else %}{{ tr("jobs.status.running") }}{% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% else %}
+  <p class="rounded border border-dashed border-[#20232d] bg-[#13151c]/50 px-4 py-8 text-center text-sm text-zinc-500">
+    {{ tr("jobs.empty") }}
+  </p>
+  {% endif %}
+
+  <!-- 分页栏 -->
+  {% if jobs %}
+  <div class="flex items-center justify-between text-sm">
+    <span class="num text-zinc-400 font-mono text-xs">{{ tr("jobs.page.summary") % (total, page, pages) }}</span>
+    <div class="flex gap-2.5">
+      {% if has_prev %}
+      <a href="/jobs?page={{ page - 1 }}{% if filter_status %}&status={{ filter_status }}{% endif %}{% if filter_type %}&type_={{ filter_type }}{% endif %}"
+         class="px-4 py-2 rounded bg-[#181b24] hover:bg-[#202430] border border-[#20232d] text-sm text-zinc-200 transition font-medium">{{ tr("jobs.page.prev") }}</a>
+      {% endif %}
+      {% if has_next %}
+      <a href="/jobs?page={{ page + 1 }}{% if filter_status %}&status={{ filter_status }}{% endif %}{% if filter_type %}&type_={{ filter_type }}{% endif %}"
+         class="px-4 py-2 rounded bg-[#181b24] hover:bg-[#202430] border border-[#20232d] text-sm text-zinc-200 transition font-medium">{{ tr("jobs.page.next") }}</a>
+      {% endif %}
+    </div>
+  </div>
+  {% endif %}
+
+</div>
+{% endblock %}

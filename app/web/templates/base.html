@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="{{ 'zh-CN' if lang() == 'zh' else 'en' }}" class="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Immich LLM Tagger {{ tr("base.console") }}{% endblock %}</title>
+  <link rel="icon" type="image/png" href="/static/img/favicon.png">
+  <link rel="apple-touch-icon" href="/static/img/apple-touch-icon.png">
+  <link rel="stylesheet" href="/static/tailwind.css">
+  <script src="/static/htmx.min.js" defer></script>
+  <!-- htmx SSE 扩展：概览/任务的 sse-connect 依赖它，缺了数字卡不刷新 -->
+  <script src="/static/sse.min.js" defer></script>
+  <script src="/static/alpine.min.js" defer></script>
+  <script>
+    // 捕获本地时区并存入 localStorage 与 Cookie，供服务端和前端展示使用
+    (function() {
+      try {
+        var tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+        if (tz) {
+          localStorage.setItem("client_tz", tz);
+          document.cookie = "client_tz=" + encodeURIComponent(tz) + "; path=/; max-age=31536000; SameSite=Lax";
+        }
+      } catch(e) {}
+    })();
+  </script>
+</head>
+<body class="min-h-[100dvh] bg-[#090a0f] text-zinc-100 antialiased font-sans selection:bg-[#5e6ad2] selection:text-white"
+      x-data="{ sidebarOpen: false }">
+
+  <div class="flex min-h-[100dvh]">
+
+    <!-- 移动端汉堡菜单遮罩 -->
+    <div x-show="sidebarOpen" x-cloak @click="sidebarOpen = false" 
+         class="fixed inset-0 z-40 bg-black/75 backdrop-blur-sm lg:hidden transition-opacity"></div>
+
+    <!-- 左侧固定侧边栏 (256px) -->
+    <aside :class="sidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'"
+           class="fixed inset-y-0 left-0 z-50 w-64 bg-[#0d0f14] border-r border-[#20232d] flex flex-col transition-transform duration-200 lg:static lg:translate-x-0">
+      
+      <!-- 品牌标识 -->
+      <div class="h-16 px-4 border-b border-[#20232d] flex items-center justify-between">
+        <a href="/" class="flex items-center gap-3">
+          <img src="/static/img/logo.svg" alt="Immich LLM Tagger Logo" class="w-8 h-8 rounded-lg object-cover aspect-square flex-shrink-0 shadow-sm">
+          <div>
+            <div class="text-base font-semibold tracking-tight text-zinc-100 leading-tight">Immich LLM Tagger</div>
+            <div class="text-xs text-zinc-400 font-mono mt-0.5">{{ tr("base.console") }}</div>
+          </div>
+        </a>
+        <button @click="sidebarOpen = false" class="lg:hidden text-zinc-400 hover:text-zinc-200 p-1.5" aria-label="{{ tr('base.close_menu') }}">
+          <svg width="20" height="20" class="w-5 h-5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+        </button>
+      </div>
+
+      <!-- 导航项列表 -->
+      <nav class="flex-1 px-3 py-5 space-y-7 overflow-y-auto">
+        <!-- 分组 1: 监控 -->
+        <div>
+          <div class="px-2.5 mb-2 text-xs font-semibold tracking-wider text-zinc-400 uppercase font-mono">{{ tr("nav.monitor") }}</div>
+          <div class="space-y-1">
+            <a href="/" 
+               class="w-full flex items-center gap-3 py-2 pr-3 rounded text-sm transition {% if request and request.url.path == '/' %}bg-[#181b24] text-white font-medium border-l-2 border-[#5e6ad2] pl-[10px]{% else %}text-zinc-300 hover:text-white hover:bg-[#13151c] pl-3{% endif %}">
+              <svg width="20" height="20" class="w-5 h-5 flex-shrink-0 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
+              </svg>
+              <span>{{ tr("nav.overview") }}</span>
+            </a>
+
+            <a href="/jobs" 
+               class="w-full flex items-center justify-between py-2 pr-3 rounded text-sm transition {% if request and request.url.path.startswith('/jobs') %}bg-[#181b24] text-white font-medium border-l-2 border-[#5e6ad2] pl-[10px]{% else %}text-zinc-300 hover:text-white hover:bg-[#13151c] pl-3{% endif %}">
+              <div class="flex items-center gap-3">
+                <svg width="20" height="20" class="w-5 h-5 flex-shrink-0 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
+                </svg>
+                <span>{{ tr("nav.jobs") }}</span>
+              </div>
+            </a>
+
+            <a href="/assets" 
+               class="w-full flex items-center gap-3 py-2 pr-3 rounded text-sm transition {% if request and request.url.path.startswith('/assets') %}bg-[#181b24] text-white font-medium border-l-2 border-[#5e6ad2] pl-[10px]{% else %}text-zinc-300 hover:text-white hover:bg-[#13151c] pl-3{% endif %}">
+              <svg width="20" height="20" class="w-5 h-5 flex-shrink-0 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+              </svg>
+              <span>{{ tr("nav.assets") }}</span>
+            </a>
+
+            <a href="/usage"
+               class="w-full flex items-center gap-3 py-2 pr-3 rounded text-sm transition {% if request and request.url.path.startswith('/usage') %}bg-[#181b24] text-white font-medium border-l-2 border-[#5e6ad2] pl-[10px]{% else %}text-zinc-300 hover:text-white hover:bg-[#13151c] pl-3{% endif %}">
+              <svg width="20" height="20" class="w-5 h-5 flex-shrink-0 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+              </svg>
+              <span>{{ tr("nav.usage") }}</span>
+            </a>
+          </div>
+        </div>
+
+        <!-- 分组 2: 系统 -->
+        <div>
+          <div class="px-2.5 mb-2 text-xs font-semibold tracking-wider text-zinc-400 uppercase font-mono">{{ tr("nav.system") }}</div>
+          <div class="space-y-1">
+            <a href="/config" 
+               class="w-full flex items-center gap-3 py-2 pr-3 rounded text-sm transition {% if request and request.url.path.startswith('/config') %}bg-[#181b24] text-white font-medium border-l-2 border-[#5e6ad2] pl-[10px]{% else %}text-zinc-300 hover:text-white hover:bg-[#13151c] pl-3{% endif %}">
+              <svg width="20" height="20" class="w-5 h-5 flex-shrink-0 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4" />
+              </svg>
+              <span>{{ tr("nav.config") }}</span>
+            </a>
+
+            <!-- 配置子页快捷入口（测试断言契约：CONFIG_LINKS 各链接必须存在于导航） -->
+            <div class="ml-6 border-l border-[#20232d] pl-3 py-1 space-y-0.5 {% if request and request.url.path.startswith('/config') %}{% else %}hidden{% endif %}">
+              <a href="/config/immich" class="block py-1 text-xs {% if request and request.url.path == '/config/immich' %}text-[#8f9bff] font-medium{% else %}text-zinc-500 hover:text-zinc-300{% endif %}">{{ tr("config.nav.immich") }}</a>
+              <a href="/config/llm" class="block py-1 text-xs {% if request and request.url.path == '/config/llm' %}text-[#8f9bff] font-medium{% else %}text-zinc-500 hover:text-zinc-300{% endif %}">{{ tr("config.nav.llm") }}</a>
+              <a href="/config/poll" class="block py-1 text-xs {% if request and request.url.path == '/config/poll' %}text-[#8f9bff] font-medium{% else %}text-zinc-500 hover:text-zinc-300{% endif %}">{{ tr("config.nav.poll") }}</a>
+              <a href="/config/scope" class="block py-1 text-xs {% if request and request.url.path == '/config/scope' %}text-[#8f9bff] font-medium{% else %}text-zinc-500 hover:text-zinc-300{% endif %}">{{ tr("config.nav.scope") }}</a>
+              <a href="/config/tags" class="block py-1 text-xs {% if request and request.url.path == '/config/tags' %}text-[#8f9bff] font-medium{% else %}text-zinc-500 hover:text-zinc-300{% endif %}">{{ tr("config.nav.tags") }}</a>
+              <a href="/config/exclusions" class="block py-1 text-xs {% if request and request.url.path == '/config/exclusions' %}text-[#8f9bff] font-medium{% else %}text-zinc-500 hover:text-zinc-300{% endif %}">{{ tr("config.nav.exclusions") }}</a>
+              <a href="/config/markers" class="block py-1 text-xs {% if request and request.url.path == '/config/markers' %}text-[#8f9bff] font-medium{% else %}text-zinc-500 hover:text-zinc-300{% endif %}">{{ tr("config.nav.markers") }}</a>
+              <a href="/config/prompt" class="block py-1 text-xs {% if request and request.url.path == '/config/prompt' %}text-[#8f9bff] font-medium{% else %}text-zinc-500 hover:text-zinc-300{% endif %}">{{ tr("config.nav.prompt") }}</a>
+            </div>
+
+            <a href="/danger"
+               class="w-full flex items-center gap-3 py-2 pr-3 rounded text-sm transition {% if request and request.url.path.startswith('/danger') %}bg-rose-950/40 text-rose-300 font-medium border-l-2 border-rose-500 pl-[10px]{% else %}text-rose-400 hover:text-rose-200 hover:bg-rose-950/20 pl-3{% endif %}">
+              <svg width="20" height="20" class="w-5 h-5 flex-shrink-0 text-rose-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+              </svg>
+              <span>{{ tr("nav.danger") }}</span>
+            </a>
+          </div>
+        </div>
+      </nav>
+
+      <!-- 底部时区信息：JS 读取 localStorage 覆盖，无值时显示 UTC -->
+        <div class="p-3.5 border-t border-[#20232d] bg-[#13151c]/60">
+        <div class="flex items-center justify-between text-xs text-zinc-300">
+          <span class="font-mono" id="tz-display">UTC</span>
+          <span class="px-2 py-0.5 rounded bg-[#181b24] font-mono text-xs text-zinc-200 font-medium" id="tz-offset-badge">{{ tr("base.tz.local") }}</span>
+        </div>
+        <div class="mt-1 text-xs text-zinc-400 truncate">{{ tr("base.tz.basis") }}</div>
+        <!-- 语言切换：写 cookie 后整页刷新（无需新增路由，模板侧 tr() 读 cookie 生效） -->
+        <button onclick="document.cookie='lang={{ 'en' if lang() == 'zh' else 'zh' }};path=/;max-age=31536000';location.reload()"
+                class="mt-3 w-full flex items-center justify-center py-1.5 rounded text-xs font-medium bg-[#181b24] border border-[#20232d] text-zinc-300 hover:text-white hover:bg-[#13151c] transition">{{ 'EN' if lang() == 'zh' else '中文' }}</button>
+      </div>
+    </aside>
+
+    <!-- 右侧主内容区域 -->
+    <div class="flex-1 flex flex-col min-w-0 bg-[#090a0f]">
+      
+      <!-- 页面顶部导航栏 (高度 56px) -->
+      <header class="h-14 border-b border-[#20232d] px-4 lg:px-8 flex items-center justify-between bg-[#0d0f14]/90 backdrop-blur-sm sticky top-0 z-30">
+        <!-- 面包屑与移动端折叠按钮 -->
+        <div class="flex items-center gap-3.5">
+          <button @click="sidebarOpen = true" class="lg:hidden text-zinc-300 hover:text-white p-1.5" aria-label="{{ tr('base.open_sidebar') }}">
+            <svg width="20" height="20" class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
+          </button>
+          
+          <div class="flex items-center gap-2.5 text-sm">
+            <span class="text-zinc-400">{{ tr("base.console") }}</span>
+            <span class="text-zinc-600">/</span>
+            <span class="text-zinc-100 font-medium">{% block page_title %}{% endblock %}</span>
+          </div>
+        </div>
+
+        <!-- 右侧状态指示器：概览页已有完整状态横幅，此处不再重复伪造状态 -->
+        <div class="flex items-center gap-3.5 text-sm">
+          <!-- 触发扫描快捷按钮 -->
+          <form method="post" action="/jobs/scan">
+            <button type="submit"
+                    class="px-3.5 py-1.5 bg-[#5e6ad2] hover:bg-[#6f7be8] active:scale-[0.98] text-white text-sm font-medium rounded transition shadow-sm">
+              {{ tr("base.trigger_scan") }}
+            </button>
+          </form>
+        </div>
+      </header>
+
+      <!-- Toast 浮层提示（右上角固定，支持 auto-dismiss） -->
+      {% if saved %}
+      <div x-data="{ show: true }" x-show="show" x-init="setTimeout(() => show = false, 3200)"
+           x-transition:enter="transition ease-out duration-200"
+           x-transition:enter-start="opacity-0 translate-y-[-10px] scale-95"
+           x-transition:enter-end="opacity-100 translate-y-0 scale-100"
+           x-transition:leave="transition ease-in duration-150"
+           x-transition:leave-start="opacity-100 translate-y-0 scale-100"
+           x-transition:leave-end="opacity-0 translate-y-[-10px] scale-95"
+           class="fixed top-16 right-8 z-50 flex items-center gap-3 px-4 py-3 rounded bg-[#181b24] border border-[#20232d] shadow-2xl text-sm text-zinc-100" role="status">
+        <svg width="20" height="20" class="w-5 h-5 text-emerald-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" />
+        </svg>
+        <span>{{ tr("common.saved") }}</span>
+        <button @click="show = false" class="text-zinc-400 hover:text-zinc-200 ml-3">
+          <svg width="16" height="16" class="w-4 h-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+        </button>
+      </div>
+      {% endif %}
+
+      {% if error %}
+      <div x-data="{ show: true }" x-show="show" x-init="setTimeout(() => show = false, 4000)"
+           x-transition:enter="transition ease-out duration-200"
+           x-transition:enter-start="opacity-0 translate-y-[-10px] scale-95"
+           x-transition:enter-end="opacity-100 translate-y-0 scale-100"
+           x-transition:leave="transition ease-in duration-150"
+           x-transition:leave-start="opacity-100 translate-y-0 scale-100"
+           x-transition:leave-end="opacity-0 translate-y-[-10px] scale-95"
+           class="fixed top-16 right-8 z-50 flex items-center gap-3 px-4 py-3 rounded bg-rose-950/80 border border-rose-800/50 shadow-2xl text-sm text-rose-200" role="alert">
+        <svg width="20" height="20" class="w-5 h-5 text-rose-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+        </svg>
+        <span>{{ tr("common.error") % error }}</span>
+        <button @click="show = false" class="text-rose-400 hover:text-rose-200 ml-3">
+          <svg width="16" height="16" class="w-4 h-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+        </button>
+      </div>
+      {% endif %}
+
+      <!-- 主视图容器 -->
+      <main class="flex-1 p-5 lg:p-8 max-w-7xl w-full mx-auto">
+        {% block content %}{% endblock %}
+      </main>
+    </div>
+
+  </div>
+
+  <script>
+    // 在 DOM 加载后读取时区并回显
+    document.addEventListener("DOMContentLoaded", function() {
+      try {
+        var tz = localStorage.getItem("client_tz") || Intl.DateTimeFormat().resolvedOptions().timeZone;
+        if (tz) {
+          var el = document.getElementById("tz-display");
+          if (el) el.textContent = tz;
+        }
+      } catch(e) {}
+    });
+    // htmx → Alpine 桥：htmx 换入的新内容（如 scope 页 outerHTML 交换）
+    // 里的 x-data / @click 不会被 Alpine 自动初始化（Alpine 只扫初始 DOM）。
+    // 每次交换后对新节点调 Alpine.initTree。
+    document.body.addEventListener("htmx:afterSwap", function(evt) {
+      if (window.Alpine && evt.target instanceof Element) {
+        window.Alpine.initTree(evt.target);
+      }
+      fmtLocalTimes(evt.target);
+    });
+
+    // 统一本地时间显示：带 data-utc="YYYY-MM-DD HH:MM:SS"（UTC）的元素
+    // 在浏览器端转换为用户本地时区。DB 一律存 UTC，展示层负责换算。
+    function fmtLocalTimes(root) {
+      var scope = (root && root.querySelectorAll) ? root : document;
+      var els = scope.querySelectorAll("[data-utc]");
+      for (var i = 0; i < els.length; i++) {
+        var el = els[i];
+        var v = el.getAttribute("data-utc");
+        if (!v) continue;
+        var d = new Date(v.replace(" ", "T") + "Z");
+        if (isNaN(d.getTime())) continue;
+        var pad = function(n) { return n < 10 ? "0" + n : "" + n; };
+        el.textContent = d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" +
+          pad(d.getDate()) + " " + pad(d.getHours()) + ":" + pad(d.getMinutes()) +
+          ":" + pad(d.getSeconds());
+      }
+    }
+    document.addEventListener("DOMContentLoaded", function() { fmtLocalTimes(document); });
+  </script>
+</body>
+</html>

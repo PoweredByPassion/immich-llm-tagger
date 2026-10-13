@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}{{ tr("config.nav.immich") }} - Immich LLM Tagger{% endblock %}
+{% block page_title %}{{ tr("config.nav.immich") }}{% endblock %}
+{% block content %}
+<div class="max-w-4xl space-y-6">
+  {% include "config/_tabs.html" %}
+
+  <div>
+    <h1 class="text-xl font-semibold tracking-tight text-[#f1f3f9]">{{ tr("config.tabs.sub_immich") }}</h1>
+    <p class="text-xs text-zinc-400 mt-1">{{ tr("config.immich.desc") }}</p>
+  </div>
+
+  <div class="card p-6 space-y-6">
+    <form method="post" action="/config/immich" class="space-y-5">
+      <div>
+        <label for="url" class="mb-1.5 block text-xs font-medium text-[#8a8f98]">{{ tr("config.common.server_url") }}</label>
+        <input type="url" id="url" name="url" value="{{ conn.url }}" required
+               placeholder="https://immich.example.com"
+               class="input w-full">
+      </div>
+
+      <div>
+        <label for="api_key" class="mb-1.5 block text-xs font-medium text-[#8a8f98]">API Key</label>
+        <input type="password" id="api_key" name="api_key" value="{{ api_key_mask }}"
+               placeholder="{{ tr('config.common.api_key_unset') }}"
+               class="input w-full font-mono">
+        <p class="mt-1.5 text-xs text-[#626773]">{{ tr("config.common.api_key_hint") }}</p>
+      </div>
+
+      <div class="flex items-center gap-2.5 pt-1">
+        <input type="checkbox" id="verify_ssl" name="verify_ssl" value="1"
+               {% if conn.verify_ssl %}checked{% endif %}
+               class="h-4 w-4 rounded-[4px] border-[#20232d] bg-[#090a0f] text-[#5e6ad2] focus:ring-0 focus:ring-offset-0">
+        <label for="verify_ssl" class="text-xs text-[#8a8f98] cursor-pointer select-none">{{ tr("config.immich.verify_ssl") }}</label>
+      </div>
+
+      <div class="pt-2 flex items-center gap-3">
+        <button type="submit" class="btn btn-primary text-xs h-9 px-4">
+          {{ tr("config.common.save") }}
+        </button>
+      </div>
+    </form>
+
+    <div class="border-t border-[#20232d] pt-5 flex items-center justify-between">
+      <div>
+        <div class="text-xs font-medium text-[#f1f3f9]">{{ tr("config.immich.test_title") }}</div>
+        <div class="text-xs text-[#8a8f98] mt-0.5">{{ tr("config.immich.test_desc") }}</div>
+      </div>
+      <form method="post" action="/config/immich/test"
+            hx-post="/config/immich/test" hx-target="#test-result" hx-swap="innerHTML">
+        <button type="submit" class="btn btn-secondary text-xs h-8 px-3">
+          {{ tr("config.common.test_button") }}
+        </button>
+      </form>
+    </div>
+
+    <div id="test-result"></div>
+  </div>
+</div>
+{% endblock %}

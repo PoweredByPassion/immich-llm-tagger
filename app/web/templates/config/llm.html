@@ -1,0 +1,147 @@
+{% extends "base.html" %}
+{% block title %}{{ tr("config.nav.llm") }} - Immich LLM Tagger{% endblock %}
+{% block page_title %}{{ tr("config.nav.llm") }}{% endblock %}
+{% block content %}
+<div class="max-w-4xl space-y-6">
+  {% include "config/_tabs.html" %}
+
+  <div>
+    <h1 class="text-xl font-semibold tracking-tight text-[#f1f3f9]">{{ tr("config.tabs.sub_llm") }}</h1>
+    <p class="text-xs text-zinc-400 mt-1">{{ tr("config.llm.desc") }}</p>
+  </div>
+
+  <div class="card p-6 space-y-6">
+    <form method="post" action="/config/llm" class="space-y-5">
+      <div>
+        <label for="base_url" class="mb-1.5 block text-xs font-medium text-[#8a8f98]">{{ tr("config.common.server_url") }}</label>
+        <input type="url" id="base_url" name="base_url" value="{{ conn.base_url }}" required
+               placeholder="https://llm.example.com"
+               class="input w-full">
+      </div>
+
+      <div>
+        <label for="llm_api_key" class="mb-1.5 block text-xs font-medium text-[#8a8f98]">API Key</label>
+        <input type="password" id="llm_api_key" name="api_key" value="{{ api_key_mask }}"
+               placeholder="{{ tr('config.common.api_key_unset') }}"
+               class="input w-full font-mono">
+        <p class="mt-1.5 text-xs text-[#626773]">{{ tr("config.common.api_key_hint") }}</p>
+      </div>
+
+      <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <div>
+          <label for="model" class="mb-1.5 block text-xs font-medium text-[#8a8f98]">{{ tr("config.llm.model") }}</label>
+          <input type="text" id="model" name="model" list="model-options" value="{{ conn.model }}"
+                 placeholder="qwen-vl-plus"
+                 class="input w-full font-mono">
+          <datalist id="model-options"></datalist>
+          <div class="mt-1.5 flex items-center gap-2">
+            <button type="button" onclick="fetchModels(this)" class="btn btn-secondary text-xs h-7 px-3">
+              {{ tr("config.llm.fetch_models") }}
+            </button>
+            <span id="model-fetch-hint" class="text-xs text-zinc-500"></span>
+          </div>
+        </div>
+        <div>
+          <label for="max_tokens" class="mb-1.5 block text-xs font-medium text-[#8a8f98]">max_tokens</label>
+          <input type="number" id="max_tokens" name="max_tokens" value="{{ conn.max_tokens }}" min="1"
+                 class="input w-full num">
+        </div>
+        <div>
+          <label for="timeout" class="mb-1.5 block text-xs font-medium text-[#8a8f98]">{{ tr("config.llm.timeout") }}</label>
+          <input type="number" id="timeout" name="timeout" value="{{ conn.timeout }}" min="1"
+                 class="input w-full num">
+        </div>
+      </div>
+
+      <div class="flex items-center gap-2.5 pt-1">
+        <input type="checkbox" id="multimodal" name="multimodal" value="1"
+               {% if conn.multimodal %}checked{% endif %}
+               class="h-4 w-4 rounded-[4px] border-[#20232d] bg-[#090a0f] text-[#5e6ad2] focus:ring-0 focus:ring-offset-0">
+        <label for="multimodal" class="text-xs text-[#8a8f98] cursor-pointer select-none">{{ tr("config.llm.multimodal") }}</label>
+      </div>
+
+      <div class="border-t border-[#20232d] pt-5 space-y-4">
+        <div>
+          <div class="text-xs font-medium text-[#f1f3f9]">{{ tr("config.llm.thumb_title") }}</div>
+          <div class="text-xs text-[#8a8f98] mt-0.5">{{ tr("config.llm.thumb_desc") }}</div>
+        </div>
+        <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <div>
+            <label for="thumb_preset" class="mb-1.5 block text-xs font-medium text-[#8a8f98]">{{ tr("config.llm.thumb_size") }}</label>
+            <select id="thumb_preset" name="thumb_preset" class="input w-full">
+              {% for p, dim in [("large", 1280), ("medium", 720), ("small", 480)] %}
+              <option value="{{ p }}" {% if settings.thumb_preset == p %}selected{% endif %}>{{ tr("config.llm.thumb_option") % (p, dim) }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div>
+            <label for="thumb_quality" class="mb-1.5 block text-xs font-medium text-[#8a8f98]">{{ tr("config.llm.thumb_quality") }}</label>
+            <input type="number" id="thumb_quality" name="thumb_quality" value="{{ settings.thumb_quality }}" min="1" max="95"
+                   class="input w-full num">
+          </div>
+        </div>
+      </div>
+
+      <div class="pt-2 flex items-center gap-3">
+        <button type="submit" class="btn btn-primary text-xs h-9 px-4">
+          {{ tr("config.common.save") }}
+        </button>
+      </div>
+    </form>
+
+    <div class="border-t border-[#20232d] pt-5 flex items-center justify-between">
+      <div>
+        <div class="text-xs font-medium text-[#f1f3f9]">{{ tr("config.llm.models_title") }}</div>
+        <div class="text-xs text-[#8a8f98] mt-0.5">{{ tr("config.llm.models_desc") }}</div>
+      </div>
+      <div class="flex items-center gap-2">
+        <form method="post" action="/config/llm/test"
+              hx-post="/config/llm/test" hx-target="#test-result" hx-swap="innerHTML">
+          <button type="submit" class="btn btn-secondary text-xs h-8 px-3">
+            {{ tr("config.common.test_button") }}
+          </button>
+        </form>
+        <form method="post" action="/config/llm/test-recognition"
+              hx-post="/config/llm/test-recognition" hx-target="#test-result" hx-swap="innerHTML">
+          <button type="submit" class="btn btn-secondary text-xs h-8 px-3">
+            {{ tr("config.llm.test_recognition") }}
+          </button>
+        </form>
+      </div>
+    </div>
+
+    <div id="test-result"></div>
+  </div>
+</div>
+
+<script>
+function fetchModels(btn) {
+  const hint = {{ tr("config.llm.fetch_empty_hint") | tojson }};
+  const hintEl = document.getElementById("model-fetch-hint");
+  btn.disabled = true;
+  hintEl.textContent = "";
+  // POST：新鲜 api_key 走请求体，绝不进 URL（访问日志/历史/Referer）。
+  fetch("/config/api/llm/models", {
+    method: "POST",
+    headers: {"Content-Type": "application/x-www-form-urlencoded"},
+    body: new URLSearchParams({
+      base_url: document.getElementById("base_url").value,
+      api_key: document.getElementById("llm_api_key").value,
+    }),
+  }).then(r => r.json()).then(d => {
+    const dl = document.getElementById("model-options");
+    dl.innerHTML = "";
+    (d.models || []).forEach(m => {
+      const o = document.createElement("option"); o.value = m; dl.appendChild(o);
+    });
+    if (!d.models || !d.models.length) {
+      // 优先展示服务端错误原文（截断防超长），否则退回通用提示。
+      hintEl.textContent = d.error ? (hint + " — " + d.error).slice(0, 300) : hint;
+    }
+  }).catch(() => {
+    // 网络层失败（端点不可达/非 JSON）同样静默降级为提示，不弹错误。
+    hintEl.textContent = hint;
+  }).finally(() => { btn.disabled = false; });
+}
+</script>
+{% endblock %}

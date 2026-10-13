@@ -1,0 +1,212 @@
+{% extends "base.html" %}
+{% block title %}{{ tr("jobs.detail.title") % job.id }} - Immich LLM Tagger{% endblock %}
+{% block page_title %}{{ tr("jobs.detail.title") % job.id }}{% endblock %}
+{% block content %}
+<div class="space-y-6">
+
+  <!-- 头部信息 -->
+  <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-2 border-b border-[#20232d]">
+    <div>
+      <h1 class="text-xl font-semibold tracking-tight text-zinc-100 flex items-center gap-3">
+        <span>{{ tr("jobs.detail.title") % job.id }}</span>
+        <span class="text-xs font-mono px-2.5 py-0.5 rounded bg-[#181b24] border border-[#20232d] text-zinc-300">{{ job.type }}</span>
+        {% if job.type == 'undo' and undo_target %}
+        <a href="/jobs/{{ undo_target }}" class="text-sm font-normal text-[#5e6ad2] hover:underline">{{ tr("jobs.detail.undo_from") % undo_target }}</a>
+        {% endif %}
+      </h1>
+    </div>
+  </div>
+
+  <div hx-ext="sse" sse-connect="/api/sse/job/{{ job.id }}" class="space-y-6">
+
+    <!-- KPI 4 卡矩阵 -->
+    <section class="grid grid-cols-2 gap-4 md:grid-cols-4">
+      <div class="p-5 rounded bg-[#13151c] border border-[#20232d]">
+        <p class="text-xs font-medium text-zinc-400">{{ tr("common.status") }}</p>
+        <p class="mt-2 text-sm font-medium">
+          <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded text-xs font-mono font-medium {% if job.status == 'failed' %}border-rose-500/30 bg-rose-500/10 text-rose-300{% elif job.status in ('done', 'running') %}border-emerald-500/30 bg-emerald-500/10 text-emerald-300{% else %}border-[#20232d] bg-[#181b24] text-zinc-300{% endif %} border">
+            {{ job.status }}
+          </span>
+        </p>
+      </div>
+      <div class="p-5 rounded bg-[#13151c] border border-[#20232d]">
+        <p class="text-xs font-medium text-zinc-400">{{ tr("jobs.th.progress") }}</p>
+        <p class="num mt-1 text-2xl font-semibold tabular-nums text-zinc-100 font-mono" sse-swap="job-progress">{{ job.done }}/{{ job.total }}</p>
+      </div>
+      <div class="p-5 rounded bg-[#13151c] border border-[#20232d]">
+        <p class="text-xs font-medium text-zinc-400">{{ tr("jobs.th.failed") }}</p>
+        <p class="num mt-1 text-2xl font-semibold tabular-nums font-mono {% if job.failed %}text-rose-400 font-medium{% else %}text-zinc-100{% endif %}">{{ job.failed }}</p>
+      </div>
+      <div class="p-5 rounded bg-[#13151c] border border-[#20232d]">
+        <p class="text-xs font-medium text-zinc-400">{{ tr("jobs.th.duration") }}</p>
+        <p class="num mt-1 text-2xl font-semibold tabular-nums text-zinc-100 font-mono">{{ duration }}</p>
+      </div>
+    </section>
+
+    <!-- 进度条面板 -->
+    <section class="p-5 rounded bg-[#13151c] border border-[#20232d] space-y-3">
+      <div class="h-2.5 w-full overflow-hidden rounded bg-[#202430]">
+        <div class="h-full bg-[#5e6ad2] rounded transition-all duration-300" style="width: {{ progress_pct }}%"></div>
+      </div>
+      <div class="grid grid-cols-2 sm:grid-cols-3 gap-4 text-sm pt-1">
+        <div>
+          <span class="text-xs text-zinc-400">{{ tr("jobs.detail.rate") }}</span> 
+          <span class="num font-mono tabular-nums text-zinc-200 ml-1">{{ rate }}</span>
+        </div>
+        <div>
+          <span class="text-xs text-zinc-400">{{ tr("jobs.detail.eta") }}</span> 
+          <span class="num font-mono tabular-nums text-zinc-200 ml-1">{{ eta }}</span>
+        </div>
+        {% if skipped > 0 %}
+        <div class="col-span-2 sm:col-span-1">
+          <span class="text-xs text-zinc-400">{{ tr("jobs.detail.skipped") }}</span>
+          <span class="num font-mono tabular-nums text-zinc-200 ml-1">{{ skipped }}</span>
+          <p class="mt-1 text-xs text-amber-300/80">{{ tr("jobs.detail.skip_note") }}</p>
+        </div>
+        {% endif %}
+      </div>
+    </section>
+
+    <!-- 操作区: 取消任务 -->
+    {% if job.status in ('queued', 'running') %}
+    <section x-data="{ confirmOpen: false }">
+      <button type="button" @click="confirmOpen = true"
+              class="px-4 py-2 rounded bg-rose-950/40 hover:bg-rose-900/40 active:scale-[0.98] border border-rose-800/50 text-sm font-medium text-rose-300 transition">
+        {{ tr("jobs.detail.cancel") }}
+      </button>
+      <div x-show="confirmOpen" x-cloak
+           class="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm px-4"
+           role="dialog" aria-modal="true">
+        <div class="w-full max-w-sm rounded bg-[#13151c] border border-[#20232d] p-6 shadow-2xl">
+          <h2 class="mb-2 text-base font-semibold text-zinc-100">{{ tr("jobs.detail.cancel_title") % job.id }}</h2>
+          <p class="mb-5 text-sm text-zinc-300">{% if job.status == 'running' %}{{ tr("jobs.detail.cancel_confirm_running") }}{% else %}{{ tr("jobs.detail.cancel_confirm_queued") }}{% endif %}</p>
+          <div class="flex justify-end gap-3">
+            <button type="button" @click="confirmOpen = false"
+                    class="px-4 py-2 rounded bg-[#181b24] hover:bg-[#202430] border border-[#20232d] text-sm text-zinc-300 font-medium transition">{{ tr("common.back") }}</button>
+            <button type="button" @click="confirmOpen = false"
+                    hx-post="/jobs/{{ job.id }}/cancel" hx-target="body" hx-swap="outerHTML"
+                    class="px-4 py-2 rounded bg-rose-950/60 hover:bg-rose-900/60 border border-rose-800 text-sm font-medium text-rose-200 transition">{{ tr("jobs.detail.confirm_cancel") }}</button>
+          </div>
+        </div>
+      </div>
+      {% if job.status == 'running' %}
+      <p class="mt-2 text-xs text-zinc-500">{{ tr("jobs.detail.running_note") }}</p>
+      {% endif %}
+    </section>
+    {% endif %}
+
+    <!-- 操作区: 回滚任务 -->
+    {% if can_undo %}
+    <section x-data="{ confirmOpen: false }">
+      {% if undo_busy %}
+      <button type="button" disabled
+              class="cursor-not-allowed px-4 py-2 rounded bg-[#181b24] border border-[#20232d] text-sm font-medium text-zinc-500">
+        {{ tr("jobs.detail.undo") }}
+      </button>
+      <p class="mt-2 text-xs text-amber-300/80">{{ tr("jobs.detail.undo_busy") }}</p>
+      {% else %}
+      <button type="button" @click="confirmOpen = true"
+              class="px-4 py-2 rounded bg-amber-500/10 hover:bg-amber-500/20 active:scale-[0.98] border border-amber-500/30 text-sm font-medium text-amber-300 transition">
+        {{ tr("jobs.detail.undo") }}
+      </button>
+      <div x-show="confirmOpen" x-cloak
+           class="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm px-4"
+           role="dialog" aria-modal="true">
+        <div class="w-full max-w-sm rounded bg-[#13151c] border border-[#20232d] p-6 shadow-2xl">
+          <h2 class="mb-2 text-base font-semibold text-zinc-100">{{ tr("jobs.detail.undo_title") % job.id }}</h2>
+          <p class="mb-5 text-sm text-zinc-300">{{ tr("jobs.detail.undo_confirm") % (undo_changes, undo_assets) }}</p>
+          <div class="flex justify-end gap-3">
+            <button type="button" @click="confirmOpen = false"
+                    class="px-4 py-2 rounded bg-[#181b24] hover:bg-[#202430] border border-[#20232d] text-sm text-zinc-300 font-medium transition">{{ tr("common.back") }}</button>
+            <button type="button" @click="confirmOpen = false"
+                    hx-post="/jobs/{{ job.id }}/undo" hx-target="body" hx-swap="outerHTML"
+                    class="px-4 py-2 rounded bg-amber-500/80 hover:bg-amber-400 text-sm font-medium text-zinc-950 transition">{{ tr("jobs.detail.confirm_undo") }}</button>
+          </div>
+        </div>
+      </div>
+      {% endif %}
+    </section>
+    {% endif %}
+
+    <!-- 撤销明细 -->
+    {% if job.type == 'undo' and undo_target %}
+    <section class="space-y-3">
+      <h2 class="text-xs font-semibold uppercase tracking-wider text-zinc-400 font-mono">{{ tr("jobs.detail.undo_log") }}</h2>
+      {% if undo_log %}
+      <div class="rounded border border-[#20232d] bg-[#13151c] overflow-hidden">
+        <table class="w-full text-sm text-left">
+          <thead class="bg-[#181b24]/80 text-zinc-400 font-mono text-xs border-b border-[#20232d]">
+            <tr>
+              <th class="py-3 px-4 font-medium">{{ tr("jobs.detail.th.action") }}</th>
+              <th class="py-3 px-4 font-medium">Asset</th>
+              <th class="py-3 px-4 font-medium">{{ tr("common.detail") }}</th>
+              <th class="py-3 px-4 font-medium">{{ tr("jobs.th.time") }}</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-[#20232d]">
+            {% for c in undo_log %}
+            <tr class="hover:bg-[#181b24]/50 transition">
+              <td class="py-3 px-4 text-zinc-200">{{ c.action }}</td>
+              <td class="py-3 px-4 text-zinc-200">
+                <a href="/assets/{{ c.asset_id }}" class="text-[#5e6ad2] hover:underline font-mono">#{{ c.asset_id }}</a>
+              </td>
+              <td class="py-3 px-4 text-zinc-400 text-xs font-mono">{{ c.payload }}</td>
+              <td class="num py-3 px-4 tabular-nums text-zinc-500 text-xs font-mono"><span data-utc="{{ c.applied_at }}">{{ c.applied_at }}</span></td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <p class="text-sm text-zinc-500">{{ tr("jobs.detail.undo_log_empty") }}</p>
+      {% endif %}
+    </section>
+    {% endif %}
+
+    <!-- 错误信息 -->
+    {% if job.error %}
+    <section class="rounded border border-rose-800/50 bg-rose-950/30 p-5 space-y-2">
+      <p class="text-xs font-medium text-rose-300 font-mono uppercase tracking-wider">{{ tr("jobs.detail.error_trace") }}</p>
+      <pre class="overflow-x-auto whitespace-pre-wrap font-mono text-sm text-rose-200 leading-relaxed">{{ job.error }}</pre>
+    </section>
+    {% endif %}
+
+    <!-- 失败清单 -->
+    {% if failures %}
+    <section class="space-y-3">
+      <h2 class="text-xs font-semibold uppercase tracking-wider text-zinc-400 font-mono">{{ tr("jobs.detail.failures") }}</h2>
+      <div class="rounded border border-[#20232d] bg-[#13151c] overflow-hidden">
+        <table class="w-full text-sm text-left">
+          <thead class="bg-[#181b24]/80 text-zinc-400 font-mono text-xs border-b border-[#20232d]">
+            <tr>
+              <th class="py-3 px-4 font-medium">Asset</th>
+              <th class="py-3 px-4 font-medium">{{ tr("jobs.detail.th.source") }}</th>
+              <th class="py-3 px-4 font-medium">{{ tr("jobs.th.time") }}</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-[#20232d]">
+            {% for r in failures %}
+            <tr class="hover:bg-[#181b24]/50 transition">
+              <td class="py-3 px-4 text-zinc-200">
+                <a href="/assets/{{ r.asset_id }}" class="text-[#5e6ad2] hover:underline font-mono">#{{ r.asset_id }}</a>
+              </td>
+              <td class="py-3 px-4 text-zinc-300">{{ r.source }}</td>
+              <td class="num py-3 px-4 tabular-nums text-zinc-500 text-xs font-mono"><span data-utc="{{ r.created_at }}">{{ r.created_at }}</span></td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+    {% endif %}
+
+    <!-- 参数快照 -->
+    <section class="space-y-3">
+      <h2 class="text-xs font-semibold uppercase tracking-wider text-zinc-400 font-mono">{{ tr("jobs.detail.params") }}</h2>
+      <pre class="overflow-x-auto rounded border border-[#20232d] bg-[#13151c] p-4 text-xs font-mono text-zinc-300 leading-relaxed">{{ params_json }}</pre>
+    </section>
+
+  </div>
+
+</div>
+{% endblock %}

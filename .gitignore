@@ -1,0 +1,21 @@
+# 开发文档与内部草稿目录
+docs/
+.superpowers/
+
+__pycache__/
+*.pyc
+*.swp
+data/
+app/web/static/tailwind.css
+# make generate 的产物（由 OpenAPI 规范生成，不要手改、不入库）
+app/clients/_immich_gen/
+bin/
+.venv/
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.coverage
+htmlcov/
+preview/
+.env

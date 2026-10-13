@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block title %}{{ tr("nav.danger") }} - Immich LLM Tagger{% endblock %}
+{% block page_title %}{{ tr("nav.danger") }}{% endblock %}
+{% block content %}
+<div class="space-y-6">
+  <div>
+    <h1 class="text-xl font-semibold tracking-tight text-[#f1f3f9]">{{ tr("nav.danger") }}</h1>
+    <p class="text-xs text-[#8a8f98] mt-1">{{ tr("danger.desc") }}</p>
+  </div>
+
+  {% if error %}
+  <div class="rounded-[6px] border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-xs text-rose-300" role="alert">
+    {{ error }}
+  </div>
+  {% endif %}
+
+  <div class="card p-4 text-xs text-[#8a8f98] flex items-center justify-between">
+    <p>{{ tr("danger.export_hint_1") }}<span class="whitespace-nowrap"><a href="/config/transfer" class="text-indigo-400 hover:text-indigo-300 underline font-medium">{{ tr("danger.export_link") }}</a></span>{{ tr("danger.export_hint_2") }}</p>
+  </div>
+
+  <div class="card border-rose-900/40 p-6" x-data="{ confirmOpen: false }">
+    <div class="flex items-center gap-2 mb-4">
+      <svg class="w-4 h-4 text-rose-400 flex-shrink-0" width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+      </svg>
+      <h2 class="text-sm font-semibold text-rose-300">{{ tr("danger.reset_title") }}</h2>
+    </div>
+
+    {% if has_active %}
+    <div class="mb-5 rounded-[6px] border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-xs text-amber-300">
+      {{ tr("danger.active_warning") }}
+    </div>
+    {% endif %}
+
+    <div class="mb-5 grid grid-cols-2 sm:grid-cols-4 gap-4 p-4 rounded-[6px] bg-[#090a0f] border border-[#20232d]">
+      <div>
+        <p class="num text-3xl font-semibold tabular-nums text-rose-400 leading-none mb-1.5">{{ unarchive_count }}</p>
+        <p class="text-xs text-[#8a8f98]">{{ tr("danger.stat.unarchive") }}</p>
+      </div>
+      <div>
+        <p class="num text-3xl font-semibold tabular-nums text-rose-400 leading-none mb-1.5">{{ tag_names | length }}</p>
+        <p class="text-xs text-[#8a8f98]">{{ tr("danger.stat.tags") }}</p>
+      </div>
+    </div>
+
+    {% if tag_names %}
+    <p class="num mb-4 text-xs text-[#8a8f98] font-mono">{{ tr("danger.tags_prefix") }}{{ tag_names | join(tr("common.list_sep")) }}</p>
+    {% endif %}
+
+    <p class="mb-6 text-xs text-rose-300/90 leading-relaxed border-l-2 border-rose-500/40 pl-3 py-0.5">
+      <strong>{{ tr("danger.note_strong") }}</strong>{{ tr("danger.note_rest") }}
+    </p>
+
+    <button type="button" @click="confirmOpen = true"
+            {% if has_active %}disabled{% endif %}
+            class="btn btn-danger text-xs h-9 px-4 disabled:opacity-40 disabled:cursor-not-allowed">
+      {{ tr("danger.reset_button") }}
+    </button>
+
+    <div x-show="confirmOpen && !{{ 'true' if has_active else 'false' }}" x-cloak
+         class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm px-4"
+         role="dialog" aria-modal="true">
+      <div class="w-full max-w-sm rounded-[6px] border border-rose-900/50 bg-[#13151c] p-6 shadow-2xl">
+        <h2 class="mb-2 text-sm font-semibold text-rose-300">{{ tr("danger.confirm_title") }}</h2>
+        <p class="mb-4 text-xs text-[#8a8f98] leading-relaxed">
+          {{ tr("danger.confirm_body_1") }}<span class="num text-[#f1f3f9] font-medium">{{ unarchive_count }}</span>{{ tr("danger.confirm_body_2") }}<span class="num text-[#f1f3f9] font-medium">{{ tag_names | length }}</span>{{ tr("danger.confirm_body_3") }}
+        </p>
+        <form method="post" action="/danger/reset">
+          <label for="confirm" class="mb-1.5 block text-xs text-[#8a8f98]">{{ tr("danger.confirm_input_1") }}<span class="num text-rose-300 font-mono font-medium">RESET</span>{{ tr("danger.confirm_input_2") }}</label>
+          <input type="text" id="confirm" name="confirm" autocomplete="off"
+                 class="input w-full text-xs h-9 mb-4 font-mono focus:border-rose-500" placeholder="RESET">
+          <div class="flex justify-end gap-2">
+            <button type="button" @click="confirmOpen = false"
+                    class="btn btn-secondary text-xs h-8 px-3">{{ tr("config.common.cancel") }}</button>
+            <button type="submit"
+                    class="btn btn-danger text-xs h-8 px-3">{{ tr("danger.execute") }}</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}{{ tr("jobs.notfound.title") }} - Immich LLM Tagger{% endblock %}
+{% block content %}
+<div class="rounded-[10px] border border-zinc-800 bg-zinc-800/30 px-6 py-12 text-center">
+  <p class="text-sm text-zinc-300">{{ tr("assets.notfound.body") % asset_id }}</p>
+  <p class="mt-2 text-xs text-zinc-500">{{ tr("assets.notfound.desc") }}</p>
+  <a href="/assets" class="mt-4 inline-block text-sm text-emerald-400 hover:underline">{{ tr("assets.notfound.back") }}</a>
+</div>
+{% endblock %}

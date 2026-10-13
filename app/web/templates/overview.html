@@ -1,0 +1,286 @@
+{% extends "base.html" %}
+{% block title %}{{ tr("nav.overview") }} - Immich LLM Tagger{% endblock %}
+{% block page_title %}{{ tr("nav.overview") }}{% endblock %}
+{% block content %}
+
+<div hx-ext="sse" sse-connect="/api/sse/overview" class="space-y-7">
+
+  <!-- 概览状态横幅：运行状态/调度模式/时区均为服务端真实数据 -->
+  <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-5 rounded bg-[#13151c] border border-[#20232d]">
+    <div class="flex items-center gap-3.5">
+      <div class="relative flex h-3.5 w-3.5">
+        {% if scheduler.poll_enabled %}
+        <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+        <span class="relative inline-flex rounded-full h-3.5 w-3.5 bg-emerald-500"></span>
+        {% else %}
+        <span class="relative inline-flex rounded-full h-3.5 w-3.5 bg-zinc-500"></span>
+        {% endif %}
+      </div>
+      <div>
+        <div class="text-base font-medium text-zinc-100 flex items-center gap-2">
+          {% if scheduler.poll_enabled %}
+          <span>{{ tr("overview.banner.running") }}</span>
+          <span class="text-zinc-600">·</span>
+          <span class="text-sm font-mono text-zinc-400">{{ tr("overview.banner.poll_mode") }} {{ scheduler.poll_interval_seconds }}s</span>
+          {% else %}
+          <span>{{ tr("overview.banner.poll_disabled") }}</span>
+          <span class="text-zinc-600">·</span>
+          <span class="text-sm font-mono text-zinc-400">{{ tr("overview.banner.webhook_only") }}</span>
+          {% endif %}
+        </div>
+        <div class="text-xs text-zinc-400 mt-0.5">
+          {% if connections.immich and connections.llm %}
+          {{ tr("overview.banner.conn_all") }}
+          {% elif connections.immich or connections.llm %}
+          {{ tr("overview.banner.conn_partial") }}
+          {% else %}
+          {{ tr("overview.banner.conn_none") }}
+          {% endif %}
+        </div>
+      </div>
+    </div>
+
+    <div class="flex items-center gap-4 text-xs font-mono">
+      <div class="hidden sm:flex items-center gap-3">
+        <span class="inline-flex items-center gap-1.5 text-zinc-300">
+          <span class="text-zinc-500">Immich:</span>
+          <span id="conn-immich" hx-swap="innerHTML" sse-swap="conn-immich">
+            {% if connections.immich %}
+            <span class="inline-flex items-center gap-1 text-emerald-400 font-medium">
+              <span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span> {{ tr("overview.conn.connected") }}
+            </span>
+            {% else %}
+            <span class="text-zinc-500">{{ tr("overview.conn.unconfigured") }}</span>
+            {% endif %}
+          </span>
+        </span>
+        <span class="inline-flex items-center gap-1.5 text-zinc-300">
+          <span class="text-zinc-500">LLM:</span>
+          <span id="conn-llm" hx-swap="innerHTML" sse-swap="conn-llm">
+            {% if connections.llm %}
+            <span class="inline-flex items-center gap-1 text-emerald-400 font-medium">
+              <span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span> {{ tr("overview.conn.connected") }}
+            </span>
+            {% else %}
+            <span class="text-zinc-500">{{ tr("overview.conn.unconfigured") }}</span>
+            {% endif %}
+          </span>
+        </span>
+      </div>
+      <span class="px-2.5 py-1 rounded bg-[#181b24] border border-[#20232d] font-mono text-zinc-200">
+        {{ tz_name }}
+      </span>
+    </div>
+  </div>
+
+  <!-- 4 张 KPI 卡 -->
+  <section>
+    <div class="flex items-center justify-between mb-3.5">
+      <h2 class="text-xs font-semibold uppercase tracking-wider text-zinc-400 font-mono">
+        {{ tr("overview.today.title") }} <span class="ml-1 text-xs text-zinc-500 font-mono">{{ tr("overview.today.by_tz") % tz_name }}</span>
+      </h2>
+      <span class="text-xs text-zinc-400 font-mono" id="tz-stat-badge">{{ tr("overview.today.since") % tz_name }}</span>
+    </div>
+
+    <div class="grid grid-cols-2 lg:grid-cols-4 gap-5">
+      
+      <!-- KPI 1: 队列深度 -->
+      <div class="p-5 rounded bg-[#13151c] border border-[#20232d] hover:border-[#282c39] transition">
+        <div class="text-sm font-medium text-zinc-400">{{ tr("overview.kpi.queued") }}</div>
+        <div class="num text-3xl font-semibold text-zinc-100 mt-2 font-mono tabular-nums" sse-swap="queued">{{ queued_jobs }}</div>
+        <div class="mt-3 text-xs text-zinc-400 flex items-center gap-2">
+          <span class="w-2 h-2 rounded-full bg-emerald-400"></span>
+          <span>{{ tr("overview.kpi.queued_sub") }}</span>
+        </div>
+      </div>
+
+      <!-- KPI 2: 今日处理 -->
+      <div class="p-5 rounded bg-[#13151c] border border-[#20232d] hover:border-[#282c39] transition">
+        <div class="text-sm font-medium text-zinc-400">{{ tr("overview.kpi.processed") }}</div>
+        <div class="num text-3xl font-semibold text-emerald-400 mt-2 font-mono tabular-nums" sse-swap="processed">{{ processed_today }}</div>
+        <div class="mt-3 text-xs text-zinc-400">
+          <span>{{ tr("overview.kpi.processed_sub") % tz_name }}</span>
+        </div>
+      </div>
+
+      <!-- KPI 3: 今日失败 -->
+      <div class="p-5 rounded bg-[#13151c] border border-[#20232d] hover:border-[#282c39] transition">
+        <div class="text-sm font-medium text-zinc-400">{{ tr("overview.kpi.failed") }}</div>
+        <div class="num text-3xl font-semibold font-mono mt-2 tabular-nums {% if failed_today %}text-rose-400{% else %}text-zinc-100{% endif %}" sse-swap="failed">{{ failed_today }}</div>
+        <div class="mt-3 text-xs text-zinc-400 flex items-center gap-2">
+          <span class="w-2 h-2 rounded-full {% if failed_today %}bg-rose-400{% else %}bg-emerald-400{% endif %}"></span>
+          <span>{% if failed_today %}{{ tr("overview.kpi.failed_sub.error") }}{% elif processed_today %}{{ tr("overview.kpi.failed_sub.none_today") }}{% else %}{{ tr("overview.kpi.failed_sub.no_data") }}{% endif %}</span>
+        </div>
+      </div>
+
+      <!-- KPI 4: 累计归档 -->
+      <div class="p-5 rounded bg-[#13151c] border border-[#20232d] hover:border-[#282c39] transition">
+        <div class="text-sm font-medium text-zinc-400">{{ tr("overview.kpi.archived") }}</div>
+        <div class="num text-3xl font-semibold text-zinc-100 mt-2 font-mono tabular-nums" sse-swap="archived">{{ archived_count }}</div>
+        <div class="mt-3 text-xs text-zinc-400">
+          <span>{{ tr("overview.kpi.archived_sub") }}</span>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- Immich 图库概览（服务端 60s 缓存；未配置/拉取失败 → 未连接） -->
+  <section>
+    <div class="flex items-center justify-between mb-3.5">
+      <h2 class="text-xs font-semibold uppercase tracking-wider text-zinc-400 font-mono">
+        {{ tr("overview.immich.title") }} <span class="ml-1 text-xs text-zinc-500 font-mono">{{ tr("overview.immich.cache") }}</span>
+      </h2>
+      {% if immich_stats %}
+      <span class="text-xs text-zinc-400 font-mono">{{ tr("overview.immich.readonly") }}</span>
+      {% endif %}
+    </div>
+
+    {% if immich_stats %}
+    <div class="grid grid-cols-2 lg:grid-cols-4 gap-5">
+      <!-- 图片总数 -->
+      <div class="p-5 rounded bg-[#13151c] border border-[#20232d] hover:border-[#282c39] transition">
+        <div class="text-sm font-medium text-zinc-400">{{ tr("overview.immich.images") }}</div>
+        <div class="num text-3xl font-semibold text-zinc-100 mt-2 font-mono tabular-nums">{{ immich_stats.images }}</div>
+        <div class="mt-3 text-xs text-zinc-400">
+          <span>{{ tr("overview.immich.images_sub") }}</span>
+        </div>
+      </div>
+
+      <!-- 库数量 -->
+      <div class="p-5 rounded bg-[#13151c] border border-[#20232d] hover:border-[#282c39] transition">
+        <div class="text-sm font-medium text-zinc-400">{{ tr("overview.immich.libraries") }}</div>
+        <div class="num text-3xl font-semibold text-zinc-100 mt-2 font-mono tabular-nums">{{ immich_stats.libraries }}</div>
+        <div class="mt-3 text-xs text-zinc-400">
+          <span>{{ tr("overview.immich.libraries_sub") }}</span>
+        </div>
+      </div>
+
+      <!-- 标签数 -->
+      <div class="p-5 rounded bg-[#13151c] border border-[#20232d] hover:border-[#282c39] transition">
+        <div class="text-sm font-medium text-zinc-400">{{ tr("overview.immich.tags") }}</div>
+        <div class="num text-3xl font-semibold text-zinc-100 mt-2 font-mono tabular-nums">{{ immich_stats.tags }}</div>
+        <div class="mt-3 text-xs text-zinc-400">
+          <span>{{ tr("overview.immich.tags_sub") }}</span>
+        </div>
+      </div>
+
+      <!-- 视频数 -->
+      <div class="p-5 rounded bg-[#13151c] border border-[#20232d] hover:border-[#282c39] transition">
+        <div class="text-sm font-medium text-zinc-400">{{ tr("overview.immich.videos") }}</div>
+        <div class="num text-3xl font-semibold text-zinc-100 mt-2 font-mono tabular-nums">{{ immich_stats.videos }}</div>
+        <div class="mt-3 text-xs text-zinc-400">
+          <span>{{ tr("overview.immich.videos_sub") }}</span>
+        </div>
+      </div>
+    </div>
+    {% else %}
+    <p class="rounded border border-dashed border-[#20232d] bg-[#13151c]/50 px-4 py-8 text-center text-sm text-zinc-500">
+      {{ tr("overview.immich.unavailable") }}
+    </p>
+    {% endif %}
+  </section>
+
+  <!-- 运行中任务 (动态进度条) -->
+  <section class="space-y-3.5">
+    <div class="flex items-center justify-between">
+      <h2 class="text-xs font-semibold uppercase tracking-wider text-zinc-400 font-mono">{{ tr("overview.running.title") }}</h2>
+      <span class="text-xs text-zinc-400 font-mono">{{ tr("overview.running.count") % (running|length) }}</span>
+    </div>
+
+    {% if running %}
+    <div class="space-y-3">
+      {% for j in running %}
+      <div class="p-5 rounded bg-[#13151c] border border-[#20232d] space-y-3">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div class="flex items-center gap-3">
+            <span class="px-2 py-0.5 rounded bg-linear-subtle text-linear-hover font-mono text-xs border border-linear-border font-medium">#{{ j.id }}</span>
+            <span class="text-base font-medium text-zinc-100">{{ j.type }}</span>
+          </div>
+          <div class="flex items-center gap-3.5 text-sm">
+            <span class="num font-mono tabular-nums text-zinc-300">{{ j.done }} / {{ j.total }}</span>
+            <span class="text-zinc-600">|</span>
+            <span class="font-mono text-linear-hover font-semibold">
+              {{ (j.done / j.total * 100) | round | int if j.total > 0 else 0 }}%
+            </span>
+            <span class="text-zinc-600">|</span>
+            <span class="text-zinc-400 text-xs">{{ tr("overview.running.active") }}</span>
+          </div>
+        </div>
+
+        <!-- 6px 精细进度条 -->
+        <div class="w-full h-2 bg-[#202430] rounded overflow-hidden">
+          <div class="h-full bg-[#5e6ad2] rounded transition-all duration-300" 
+               style="width: {{ (j.done / j.total * 100) | round | int if j.total > 0 else 0 }}%"></div>
+        </div>
+
+        <div class="flex items-center justify-end text-xs text-zinc-400 pt-1">
+          <div class="flex items-center gap-3 text-sm">
+            <a href="/jobs/{{ j.id }}" class="text-linear-hover hover:underline">{{ tr("overview.running.view_detail") }}</a>
+          </div>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <p class="rounded border border-dashed border-[#20232d] bg-[#13151c]/50 px-4 py-8 text-center text-sm text-zinc-500">
+      {{ tr("overview.running.empty") }}
+    </p>
+    {% endif %}
+  </section>
+
+  <!-- 最近任务历史表格 -->
+  <section class="space-y-3.5">
+    <div class="flex items-center justify-between">
+      <h2 class="text-xs font-semibold uppercase tracking-wider text-zinc-400 font-mono">{{ tr("overview.recent.title") }}</h2>
+      <a href="/jobs" class="text-sm text-linear-hover hover:underline">{{ tr("overview.recent.view_all") }} &rarr;</a>
+    </div>
+
+    {% if recent_jobs %}
+    <div class="rounded border border-[#20232d] bg-[#13151c] overflow-hidden">
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm text-left">
+          <thead class="bg-[#181b24]/80 text-zinc-400 font-mono text-xs border-b border-[#20232d]">
+            <tr>
+              <th class="py-3 px-4 font-medium">{{ tr("overview.recent.th.id") }}</th>
+              <th class="py-3 px-4 font-medium">{{ tr("common.type") }}</th>
+              <th class="py-3 px-4 font-medium">{{ tr("common.status") }}</th>
+              <th class="py-3 px-4 font-medium">{{ tr("overview.recent.th.progress") }}</th>
+              <th class="py-3 px-4 font-medium text-right">{{ tr("common.actions") }}</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-[#20232d]">
+            {% for j in recent_jobs %}
+            <tr class="hover:bg-[#181b24]/50 transition">
+              <td class="num py-3.5 px-4 font-mono tabular-nums text-zinc-200 font-medium">
+                <a href="/jobs/{{ j.id }}" class="text-[#5e6ad2] hover:underline">#{{ j.id }}</a>
+              </td>
+              <td class="py-3.5 px-4 text-zinc-200">{{ j.type }}</td>
+              <td class="py-3.5 px-4">
+                {% if j.status == 'failed' %}
+                <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded text-xs font-mono font-medium bg-rose-500/10 text-rose-400 border border-rose-500/20">failed</span>
+                {% elif j.status in ('done', 'completed') %}
+                <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded text-xs font-mono font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">done</span>
+                {% else %}
+                <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded text-xs font-mono font-medium bg-linear-subtle text-linear-hover border border-linear-border">{{ j.status }}</span>
+                {% endif %}
+              </td>
+              <td class="num py-3.5 px-4 font-mono tabular-nums text-zinc-300">{{ j.done }} / {{ j.total }}</td>
+              <td class="py-3.5 px-4 text-right">
+                <a href="/jobs/{{ j.id }}" class="text-zinc-300 hover:text-white text-xs">{{ tr("common.detail") }}</a>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    {% else %}
+    <p class="rounded border border-dashed border-[#20232d] bg-[#13151c]/50 px-4 py-8 text-center text-sm text-zinc-500">
+      {{ tr("jobs.empty") }}
+    </p>
+    {% endif %}
+  </section>
+
+</div>
+{% endblock %}

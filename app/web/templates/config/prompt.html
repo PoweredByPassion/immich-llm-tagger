@@ -1,0 +1,262 @@
+{% extends "base.html" %}
+{% block title %}{{ tr("config.nav.prompt") }} - Immich LLM Tagger{% endblock %}
+{% block page_title %}{{ tr("config.nav.prompt") }}{% endblock %}
+{% block content %}
+<div class="space-y-6">
+  {% include "config/_tabs.html" %}
+
+  <div>
+    <h1 class="text-xl font-semibold tracking-tight text-[#f1f3f9]">{{ tr("config.prompt.title") }}</h1>
+    <p class="text-xs text-zinc-400 mt-1">{{ tr("config.prompt.desc") }}</p>
+  </div>
+
+  {% if saved %}
+  <div class="rounded bg-emerald-500/10 border border-emerald-500/30 px-4 py-3 text-xs text-emerald-300">
+    {{ tr("config.prompt.saved_msg") }}
+  </div>
+  {% endif %}
+  {% if activated %}
+  <div class="rounded bg-emerald-500/10 border border-emerald-500/30 px-4 py-3 text-xs text-emerald-300">
+    {{ tr("config.prompt.activated") % active_id }}
+  </div>
+  {% endif %}
+  {% if use_default %}
+  <div class="rounded bg-emerald-500/10 border border-emerald-500/30 px-4 py-3 text-xs text-emerald-300">
+    {{ tr("config.prompt.use_default_msg") }}
+  </div>
+  {% endif %}
+  {% if sandbox_saved %}
+  <div class="rounded bg-emerald-500/10 border border-emerald-500/30 px-4 py-3 text-xs text-emerald-300">
+    {{ tr("config.prompt.sandbox_queued_1") }}<a href="/assets" class="underline hover:text-emerald-200 ml-1">{{ tr("config.prompt.assets_link") }}</a>{{ tr("config.prompt.sandbox_queued_2") }}
+  </div>
+  {% endif %}
+  {% if sandbox_error %}
+  <div class="rounded bg-rose-950/80 border border-rose-800/50 px-4 py-3 text-xs text-rose-200">
+    {{ tr("common.error") % sandbox_error }}
+  </div>
+  {% endif %}
+  {% if error %}
+  <div class="rounded bg-rose-950/80 border border-rose-800/50 px-4 py-3 text-xs text-rose-200">
+    {{ tr("common.error") % error }}
+  </div>
+  {% endif %}
+
+  <!-- 模板编辑卡片 -->
+  <div class="card p-6 space-y-5">
+    {% if latest %}
+    <form method="post" action="/config/prompt" class="space-y-4">
+      <div>
+        <div class="flex items-center justify-between mb-2">
+          <label for="body" class="block text-sm font-medium text-zinc-200">{{ tr("config.prompt.body_label") }}</label>
+          <div class="flex items-center gap-3">
+            <button type="button" onclick="fillSamplePrompt()" class="px-2.5 py-1 rounded bg-[#181b24] hover:bg-[#202430] border border-[#20232d] text-xs text-zinc-300 hover:text-white transition">
+              {{ tr("config.prompt.fill_sample") }}
+            </button>
+            <span class="text-xs text-zinc-400 font-mono">{{ tr("config.prompt.latest_ver") % latest.id }}</span>
+          </div>
+        </div>
+        <textarea id="body" name="body" rows="12"
+                  class="input w-full font-mono text-sm leading-relaxed p-4 h-auto focus:ring-1 focus:ring-[#5e6ad2]/30">{{ latest.body }}</textarea>
+        <p class="mt-2 text-xs text-zinc-400 leading-relaxed">
+          {{ tr("config.prompt.required_ph") }} <code class="font-mono text-indigo-400 bg-[#181b24] px-1 py-0.5 rounded border border-[#20232d]">{{ '{' }}{TAG_LIST{{ '}' }}}</code>{{ tr("common.semi_sep") }}
+          {{ tr("config.prompt.optional_ph") }}<code class="font-mono text-indigo-400 bg-[#181b24] px-1 py-0.5 rounded border border-[#20232d]">{{ '{' }}{FILENAME{{ '}' }}}</code>{{ tr("common.list_sep") }}
+          <code class="font-mono text-indigo-400 bg-[#181b24] px-1 py-0.5 rounded border border-[#20232d]">{{ '{' }}{EXIF{{ '}' }}}</code>{{ tr("common.list_sep") }}
+          <code class="font-mono text-indigo-400 bg-[#181b24] px-1 py-0.5 rounded border border-[#20232d]">{{ '{' }}{SCOPE{{ '}' }}}</code>{{ tr("common.list_sep") }}
+          <code class="font-mono text-indigo-400 bg-[#181b24] px-1 py-0.5 rounded border border-[#20232d]">{{ '{' }}{DATE{{ '}' }}}</code>
+          {{ tr("config.prompt.missing_note") }}
+        </p>
+      </div>
+
+      <div>
+        <label for="note" class="mb-1.5 block text-xs font-medium text-zinc-300">{{ tr("config.prompt.note_label") }}</label>
+        <input type="text" id="note" name="note" value="{{ latest.note }}"
+               placeholder="{{ tr('config.prompt.note_placeholder') }}"
+               class="input w-full">
+      </div>
+
+      <div class="pt-2 flex flex-wrap items-center gap-3">
+        <button type="submit" class="btn btn-primary text-sm h-10 px-5">
+          {{ tr("config.prompt.save_new") }}
+        </button>
+      </div>
+    </form>
+
+    <div class="border-t border-[#20232d] pt-4 flex items-center justify-between">
+      <div class="text-xs text-zinc-400">{{ tr("config.prompt.preview_desc") }}</div>
+      <form method="post" action="/config/prompt/preview"
+            hx-post="/config/prompt/preview" hx-target="#preview-result" hx-swap="innerHTML"
+            hx-include="[name='body']">
+        <button type="submit" class="btn btn-secondary text-xs h-8 px-3">
+          {{ tr("config.prompt.preview_button") }}
+        </button>
+      </form>
+    </div>
+    {% else %}
+    <div class="flex items-center justify-between">
+      <p class="text-xs text-zinc-400">{{ tr("config.prompt.no_template") }}</p>
+      <button type="button" onclick="fillSamplePrompt()" class="px-3 py-1.5 rounded bg-[#181b24] hover:bg-[#202430] border border-[#20232d] text-xs text-zinc-200 hover:text-white transition">
+        {{ tr("config.prompt.fill_default") }}
+      </button>
+    </div>
+    <form method="post" action="/config/prompt" class="space-y-4">
+      <div>
+        <label for="body" class="mb-1.5 block text-xs font-medium text-zinc-300">{{ tr("config.prompt.body_label") }}</label>
+        <textarea id="body" name="body" rows="12"
+                  class="input w-full font-mono text-sm leading-relaxed p-4 h-auto focus:ring-1 focus:ring-[#5e6ad2]/30">{{ default_template }}</textarea>
+        <p class="mt-2 text-xs text-zinc-400 leading-relaxed">
+          {{ tr("config.prompt.required_ph") }} <code class="font-mono text-indigo-400 bg-[#181b24] px-1 py-0.5 rounded border border-[#20232d]">{{ '{' }}{TAG_LIST{{ '}' }}}</code>{{ tr("common.semi_sep") }}
+          {{ tr("config.prompt.optional_ph") }}<code class="font-mono text-indigo-400 bg-[#181b24] px-1 py-0.5 rounded border border-[#20232d]">{{ '{' }}{FILENAME{{ '}' }}}</code>{{ tr("common.list_sep") }}
+          <code class="font-mono text-indigo-400 bg-[#181b24] px-1 py-0.5 rounded border border-[#20232d]">{{ '{' }}{EXIF{{ '}' }}}</code>{{ tr("common.list_sep") }}
+          <code class="font-mono text-indigo-400 bg-[#181b24] px-1 py-0.5 rounded border border-[#20232d]">{{ '{' }}{SCOPE{{ '}' }}}</code>{{ tr("common.list_sep") }}
+          <code class="font-mono text-indigo-400 bg-[#181b24] px-1 py-0.5 rounded border border-[#20232d]">{{ '{' }}{DATE{{ '}' }}}</code>
+          {{ tr("config.prompt.missing_note") }}
+        </p>
+      </div>
+      <div>
+        <label for="note" class="mb-1.5 block text-xs font-medium text-zinc-300">{{ tr("config.prompt.note_label") }}</label>
+        <input type="text" id="note" name="note" value=""
+               placeholder="{{ tr('config.prompt.note_placeholder_default') }}"
+               class="input w-full">
+      </div>
+      <button type="submit" class="btn btn-primary text-sm h-10 px-5">
+        {{ tr("config.prompt.save_new") }}
+      </button>
+    </form>
+    {% endif %}
+
+    <div id="preview-result"></div>
+  </div>
+
+  <script>
+    function fillSamplePrompt() {
+      var sample = {{ tr("config.prompt.sample_blob") | tojson }};
+      var el = document.getElementById("body");
+      if (el) {
+        el.value = sample;
+        el.focus();
+      }
+    }
+  </script>
+
+
+  <!-- 版本历史区 -->
+  {% if versions %}
+  <section class="card p-6 space-y-4">
+    <div>
+      <h2 class="text-sm font-semibold text-[#f1f3f9]">{{ tr("config.prompt.history_title") }}</h2>
+      <p class="text-xs text-[#8a8f98] mt-0.5">{{ tr("config.prompt.history_desc") }}</p>
+    </div>
+
+    <ul class="space-y-2.5">
+      {% for v in versions %}
+      <li class="rounded-[6px] border {% if active_id == v.id %}border-indigo-500/40 bg-indigo-500/5{% else %}border-[#20232d] bg-[#090a0f]/60{% endif %} p-4 transition"
+          x-data="{ confirmOpen: false }">
+        <details class="group">
+          <summary class="cursor-pointer text-xs flex flex-wrap items-center gap-2 text-[#f1f3f9] select-none">
+            <span class="num font-mono font-medium">#{{ v.id }}</span>
+            <span class="text-[#8a8f98]">·</span>
+            <span class="num font-mono text-[#8a8f98]"><span data-utc="{{ v.created_at }}">{{ v.created_at }}</span></span>
+            {% if v.note %}<span class="text-[#8a8f98]">· {{ v.note }}</span>{% endif %}
+            {% if active_id == v.id %}
+            <span class="pill pill-indigo text-[11px] ml-1">{{ tr("config.prompt.active_badge") }}</span>
+            {% elif loop.first %}
+            <span class="pill pill-neutral text-[11px] ml-1">{{ tr("config.prompt.latest_badge") }}</span>
+            {% endif %}
+            <span class="ml-auto text-xs text-[#8a8f98] group-open:rotate-180 transition-transform">▼</span>
+          </summary>
+          <pre class="mt-3 whitespace-pre-wrap font-mono text-xs leading-relaxed text-zinc-300 bg-[#090a0f] p-3 rounded-[6px] border border-[#20232d] overflow-x-auto">{{ v.body }}</pre>
+        </details>
+
+        {% if active_id != v.id %}
+        <div class="mt-3 pt-3 border-t border-[#20232d]/80 flex justify-end">
+          <button type="button" @click="confirmOpen = true"
+                  class="btn btn-secondary text-xs h-7 px-2.5">
+            {{ tr("config.prompt.activate") }}
+          </button>
+          <!-- 激活确认模态弹层 -->
+          <div x-show="confirmOpen" x-cloak
+               class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm px-4"
+               role="dialog" aria-modal="true">
+            <div class="w-full max-w-sm rounded-[6px] border border-[#20232d] bg-[#13151c] p-6 shadow-2xl text-left">
+              <h2 class="mb-2 text-sm font-semibold text-[#f1f3f9]">{{ tr("config.prompt.activate_title") % v.id }}</h2>
+              <p class="mb-5 text-xs text-[#8a8f98] leading-relaxed">{{ tr("config.prompt.activate_confirm") }}</p>
+              <div class="flex justify-end gap-2">
+                <button type="button" @click="confirmOpen = false"
+                        class="btn btn-secondary text-xs h-8 px-3">
+                  {{ tr("config.common.cancel") }}
+                </button>
+                <button type="button" @click="confirmOpen = false"
+                        hx-post="/config/prompt/{{ v.id }}/activate" hx-target="body" hx-swap="outerHTML"
+                        class="btn btn-primary text-xs h-8 px-3">
+                  {{ tr("config.prompt.activate_button") }}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+        {% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+
+    {% if active_id is not none %}
+    <div class="pt-2" x-data="{ confirmOpen: false }">
+      <button type="button" @click="confirmOpen = true"
+              class="btn btn-secondary text-xs h-8 px-3">
+        {{ tr("config.prompt.use_default") }}
+      </button>
+      <div x-show="confirmOpen" x-cloak
+           class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm px-4"
+           role="dialog" aria-modal="true">
+        <div class="w-full max-w-sm rounded-[6px] border border-[#20232d] bg-[#13151c] p-6 shadow-2xl text-left">
+          <h2 class="mb-2 text-sm font-semibold text-[#f1f3f9]">{{ tr("config.prompt.use_default_title") }}</h2>
+          <p class="mb-5 text-xs text-[#8a8f98] leading-relaxed">{{ tr("config.prompt.use_default_confirm") }}</p>
+          <div class="flex justify-end gap-2">
+            <button type="button" @click="confirmOpen = false"
+                    class="btn btn-secondary text-xs h-8 px-3">
+              {{ tr("config.common.cancel") }}
+            </button>
+            <button type="button" @click="confirmOpen = false"
+                    hx-post="/config/prompt/activate-default" hx-target="body" hx-swap="outerHTML"
+                    class="btn btn-primary text-xs h-8 px-3">
+              {{ tr("config.common.confirm") }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+    {% endif %}
+  </section>
+  {% endif %}
+
+  <!-- 沙盒调试区 -->
+  <section class="card p-6 space-y-4">
+    <div>
+      <h2 class="text-sm font-semibold text-[#f1f3f9]">{{ tr("common.sandbox") }}</h2>
+      <p class="text-xs text-[#8a8f98] mt-0.5">{{ tr("config.prompt.sandbox_desc") }}</p>
+    </div>
+
+    <form method="post" action="/config/prompt/sandbox" class="flex flex-wrap items-end gap-3.5">
+      <input type="hidden" name="body" id="sandbox-body"
+             value="">
+      <div class="flex-1 min-w-[280px]">
+        <label for="sandbox-asset" class="mb-1.5 block text-xs font-medium text-[#8a8f98]">Asset ID</label>
+        <input type="text" id="sandbox-asset" name="asset_id" value="{{ sandbox_random or '' }}"
+               placeholder="{{ tr('config.prompt.asset_placeholder') }}"
+               class="input w-full font-mono">
+      </div>
+      <button type="submit" class="btn btn-primary text-xs h-9 px-4 flex-shrink-0"
+              onclick="document.getElementById('sandbox-body').value = (document.getElementById('body') || {}).value || ''">
+        {{ tr("config.prompt.dryrun") }}
+      </button>
+    </form>
+    <p class="text-xs text-[#626773]">{{ tr("config.prompt.dryrun_hint") }}</p>
+
+    <form method="post" action="/config/prompt/sandbox/random">
+      <button type="submit" class="btn btn-secondary text-xs h-8 px-3">
+        {{ tr("config.prompt.random") }}
+      </button>
+    </form>
+  </section>
+</div>
+{% endblock %}

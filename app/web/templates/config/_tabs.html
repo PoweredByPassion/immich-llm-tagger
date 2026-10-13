@@ -1,0 +1,68 @@
+<div class="space-y-4 mb-6">
+  <!-- 3 Tab 主切换条 -->
+  <div class="border-b border-[#20232d] flex items-center justify-between gap-4">
+    <div class="flex items-center gap-2 -mb-px">
+      <a href="/config/immich"
+         class="px-5 py-3 text-sm border-b-2 transition flex items-center gap-2.5 {% if request and (request.url.path in ['/config/immich', '/config/llm', '/config/poll', '/config']) %}border-[#5e6ad2] text-white font-medium bg-[#13151c]/40{% else %}border-transparent text-zinc-400 hover:text-zinc-200{% endif %}">
+        <span>{{ tr("config.tabs.connection") }}</span>
+        <span class="text-xs font-mono px-2 py-0.5 rounded bg-[#181b24] text-zinc-400">{{ tr("config.tabs.connection_count") }}</span>
+      </a>
+
+      <a href="/config/scope"
+         class="px-5 py-3 text-sm border-b-2 transition flex items-center gap-2.5 {% if request and (request.url.path in ['/config/scope', '/config/tags', '/config/exclusions', '/config/markers', '/config/prompt']) %}border-[#5e6ad2] text-white font-medium bg-[#13151c]/40{% else %}border-transparent text-zinc-400 hover:text-zinc-200{% endif %}">
+        <span>{{ tr("config.tabs.rules") }}</span>
+        <span class="text-xs font-mono px-2 py-0.5 rounded bg-[#181b24] text-zinc-400">{{ tr("config.tabs.rules_count") }}</span>
+      </a>
+
+      <a href="/config/transfer"
+         class="px-5 py-3 text-sm border-b-2 transition flex items-center gap-2.5 {% if request and request.url.path == '/config/transfer' %}border-[#5e6ad2] text-white font-medium bg-[#13151c]/40{% else %}border-transparent text-zinc-400 hover:text-zinc-200{% endif %}">
+        <span>{{ tr("config.tabs.maintenance") }}</span>
+        <span class="text-xs font-mono px-2 py-0.5 rounded bg-[#181b24] text-zinc-400">{{ tr("config.tabs.maintenance_count") }}</span>
+      </a>
+    </div>
+  </div>
+
+  <!-- 次级子页面胶囊导航 -->
+  <div class="flex flex-wrap items-center gap-2 pt-1 text-xs">
+    {% if request and (request.url.path in ['/config/immich', '/config/llm', '/config/poll', '/config']) %}
+    <a href="/config/immich"
+       class="px-3.5 py-1.5 rounded transition font-medium {% if request.url.path in ['/config/immich', '/config'] %}bg-[#5e6ad2] text-white shadow-sm{% else %}bg-[#181b24] text-zinc-300 hover:text-white hover:bg-[#202430] border border-[#20232d]{% endif %}">
+      {{ tr("config.tabs.sub_immich") }}
+    </a>
+    <a href="/config/llm"
+       class="px-3.5 py-1.5 rounded transition font-medium {% if request.url.path == '/config/llm' %}bg-[#5e6ad2] text-white shadow-sm{% else %}bg-[#181b24] text-zinc-300 hover:text-white hover:bg-[#202430] border border-[#20232d]{% endif %}">
+      {{ tr("config.tabs.sub_llm") }}
+    </a>
+    <a href="/config/poll"
+       class="px-3.5 py-1.5 rounded transition font-medium {% if request.url.path == '/config/poll' %}bg-[#5e6ad2] text-white shadow-sm{% else %}bg-[#181b24] text-zinc-300 hover:text-white hover:bg-[#202430] border border-[#20232d]{% endif %}">
+      {{ tr("config.tabs.sub_poll") }}
+    </a>
+    {% elif request and (request.url.path in ['/config/scope', '/config/tags', '/config/exclusions', '/config/markers', '/config/prompt']) %}
+    <a href="/config/scope"
+       class="px-3.5 py-1.5 rounded transition font-medium {% if request.url.path == '/config/scope' %}bg-[#5e6ad2] text-white shadow-sm{% else %}bg-[#181b24] text-zinc-300 hover:text-white hover:bg-[#202430] border border-[#20232d]{% endif %}">
+      {{ tr("config.tabs.sub_scope") }}
+    </a>
+    <a href="/config/tags"
+       class="px-3.5 py-1.5 rounded transition font-medium {% if request.url.path == '/config/tags' %}bg-[#5e6ad2] text-white shadow-sm{% else %}bg-[#181b24] text-zinc-300 hover:text-white hover:bg-[#202430] border border-[#20232d]{% endif %}">
+      {{ tr("config.tabs.sub_tags") }}
+    </a>
+    <a href="/config/exclusions"
+       class="px-3.5 py-1.5 rounded transition font-medium {% if request.url.path == '/config/exclusions' %}bg-[#5e6ad2] text-white shadow-sm{% else %}bg-[#181b24] text-zinc-300 hover:text-white hover:bg-[#202430] border border-[#20232d]{% endif %}">
+      {{ tr("config.nav.exclusions") }}
+    </a>
+    <a href="/config/markers"
+       class="px-3.5 py-1.5 rounded transition font-medium {% if request.url.path == '/config/markers' %}bg-[#5e6ad2] text-white shadow-sm{% else %}bg-[#181b24] text-zinc-300 hover:text-white hover:bg-[#202430] border border-[#20232d]{% endif %}">
+      {{ tr("config.nav.markers") }}
+    </a>
+    <a href="/config/prompt"
+       class="px-3.5 py-1.5 rounded transition font-medium {% if request.url.path == '/config/prompt' %}bg-[#5e6ad2] text-white shadow-sm{% else %}bg-[#181b24] text-zinc-300 hover:text-white hover:bg-[#202430] border border-[#20232d]{% endif %}">
+      {{ tr("config.nav.prompt") }}
+    </a>
+    {% elif request and request.url.path == '/config/transfer' %}
+    <a href="/config/transfer"
+       class="px-3.5 py-1.5 rounded transition font-medium bg-[#5e6ad2] text-white shadow-sm">
+      {{ tr("config.tabs.sub_transfer") }}
+    </a>
+    {% endif %}
+  </div>
+</div>

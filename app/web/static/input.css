@@ -1,0 +1,80 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* 唯一的圆角 token：所有组件圆角统一走这里 */
+    --radius: 6px;
+  }
+
+  /* Alpine 初始化前隐藏 x-cloak 元素（confirm 弹层等） */
+  [x-cloak] {
+    display: none !important;
+  }
+
+  /* 精细滚动条 */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: #090a0f;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #20232d;
+    border-radius: 3px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #2e3342;
+  }
+}
+
+@layer components {
+  /* 基础按钮 (文字 14px，热区舒适) */
+  .btn {
+    @apply inline-flex items-center justify-center px-4 py-2 text-sm font-medium rounded transition duration-150 active:scale-[0.98] focus:outline-none;
+  }
+  .btn-primary {
+    @apply btn bg-[#5e6ad2] hover:bg-[#6f7be8] text-white shadow-sm;
+  }
+  .btn-secondary {
+    @apply btn bg-[#181b24] hover:bg-[#202430] text-zinc-200 border border-[#20232d];
+  }
+  .btn-danger {
+    @apply btn bg-rose-950/40 hover:bg-rose-900/40 text-rose-300 border border-rose-800/50;
+  }
+  .btn-ghost {
+    @apply btn hover:bg-[#181b24] text-zinc-400 hover:text-zinc-200;
+  }
+
+  /* 输入控件 (文字 14px，padding 舒适) */
+  .input {
+    @apply w-full px-3.5 py-2.5 rounded bg-[#181b24] border border-[#20232d] text-sm text-zinc-100 placeholder-zinc-500 focus:border-[#5e6ad2] focus:ring-1 focus:ring-[#5e6ad2]/30 outline-none transition font-sans;
+  }
+
+  /* 卡片容器 (p-6 舒适内边距) */
+  .card {
+    @apply p-6 rounded bg-[#13151c] border border-[#20232d];
+  }
+
+  /* 状态胶囊 */
+  .pill {
+    @apply inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded text-xs font-mono font-medium;
+  }
+
+  /* 紧凑数据表格 (行高放宽至 py-3.5) */
+  .table-compact th {
+    @apply py-3 px-4 font-mono font-medium text-xs text-zinc-400 bg-[#181b24]/80 border-b border-[#20232d];
+  }
+  .table-compact td {
+    @apply py-3.5 px-4 text-sm text-zinc-300 border-b border-[#20232d];
+  }
+}
+
+@layer utilities {
+  /* 数值列统一使用，保证数字对齐 */
+  .num {
+    font-variant-numeric: tabular-nums;
+  }
+}
