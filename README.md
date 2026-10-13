@@ -198,6 +198,18 @@ docker build -t ghcr.io/poweredbypassion/immich-llm-tagger:latest .
 
 ---
 
+## ☕ Donate
+
+If this project saved you some time, consider buying me a drink:
+
+👉[Buy me a beer](https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=M67JY6LTXNLB4&on0=donate&os0=Buy+Me+A+Beer)
+
+👉[Buy me a vps](https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=M67JY6LTXNLB4&on0=donate&os0=Buy+Me+A+VPS)
+
+👉[Buy me a keyboard](https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=M67JY6LTXNLB4&on0=donate&os0=Buy+Me+A+Keyboard)
+
+---
+
 ## 📄 License
 
 This project is open-source under the [MIT License](LICENSE).
