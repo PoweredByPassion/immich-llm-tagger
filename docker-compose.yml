@@ -1,7 +1,6 @@
 services:
   immich-llm-tagger:
-    build:
-      context: .
+    image: ghcr.io/poweredbypassion/immich-llm-tagger:latest
     ports:
       - "8080:8080"
     volumes:
