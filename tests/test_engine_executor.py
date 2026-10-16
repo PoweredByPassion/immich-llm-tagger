@@ -1346,8 +1346,9 @@ def test_reset_dispatch_runs_steps_and_finishes(db, monkeypatch):
     seen: dict = {}
     monkeypatch.setattr(
         executor_module, "run_reset_steps",
-        lambda db, client, *, job_id, is_canceled: (
-            seen.update(job_id=job_id, cancel_fn=is_canceled) or steps))
+        lambda db, client, *, job_id, is_canceled, dimensions=None: (
+            seen.update(job_id=job_id, cancel_fn=is_canceled,
+                        dimensions=dimensions) or steps))
     jid = jobs.create_job(db, "reset", {})
     run_job(db, object(), None, jobs.get_job(db, jid))
 
@@ -1355,8 +1356,15 @@ def test_reset_dispatch_runs_steps_and_finishes(db, monkeypatch):
     assert row.status == "done"
     assert seen["job_id"] == jid
     assert callable(seen["cancel_fn"])
+    assert seen["dimensions"] is None      # params={} → None（向后兼容，等价全集）
     types = event_types(db)
     assert "job_started" in types and "job_complete" in types
+
+    # params 带 dimensions → 解析成集合后原样下传
+    jid2 = jobs.create_job(db, "reset", {"dimensions": ["rating"]})
+    run_job(db, object(), None, jobs.get_job(db, jid2))
+    assert jobs.get_job(db, jid2).status == "done"
+    assert seen["dimensions"] == {"rating"}
 
 
 def test_reset_dispatch_unexpected_exception_fails_job(db, monkeypatch):

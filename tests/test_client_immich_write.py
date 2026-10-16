@@ -423,6 +423,13 @@ def test_ensure_album_filters_by_name_query() -> None:
     assert seen["name"] == "查询相册"
 
 
+def test_list_albums_returns_all() -> None:
+    rec = Recorder({("GET", "/api/albums"): [_album_payload("3", "截图相册")]})
+    albums = _client(rec).list_albums()
+    assert [a.album_name for a in albums] == ["截图相册"]
+    assert rec.calls[0][2] == b""      # 不带 name 查询参数
+
+
 def test_add_to_album_single_chunk() -> None:
     rec = Recorder({("PUT", f"/api/albums/{ALBUM_ID}/assets"): []})
     _client(rec).add_to_album(ALBUM_ID, [ASSET_ID])

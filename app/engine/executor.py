@@ -675,7 +675,9 @@ def run_reset_job(db: Database, client, job: jobs.JobRow) -> None:
 
 def _run_reset_job(db, client, job) -> None:
     _log_job_event(db, "job_started", job)
+    dims = job.params.get("dimensions")
     done = run_reset_steps(db, client, job_id=job.id,
-                           is_canceled=lambda: jobs.is_canceled(db, job.id))
+                           is_canceled=lambda: jobs.is_canceled(db, job.id),
+                           dimensions=set(dims) if dims else None)
     jobs.finish_job(db, job.id)
     _log_job_event(db, "job_complete", job, **done)

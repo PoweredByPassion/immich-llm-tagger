@@ -74,15 +74,22 @@ def _tagged_asset_map(db: Database, managed: set[str]) -> dict[str, list[str]]:
     return out
 
 
-def run_reset_steps(db: Database, client, *, job_id: int | None,
-                    is_canceled) -> dict:
-    """顺序执行：unarchive → 摘标签 → 清 asset_state。is_canceled 在
-    每步之间轮询；取消则提前返回（canceled=True，已完成步骤的结果保留）。
-    返回计数字典供 executor 的 job_complete 事件使用。"""
-    result: dict = {"unarchived": 0, "untagged_tags": 0, "deleted_tags": 0}
+_RESET_DIMENSIONS = frozenset({"tag", "classification", "rating", "description"})
 
-    # ① unarchive
-    if not is_canceled():
+
+def run_reset_steps(db: Database, client, *, job_id: int | None,
+                    is_canceled, dimensions: set[str] | None = None) -> dict:
+    """按勾选维度执行：unarchive → 摘标签 → 移出相册 → 还原评分/描述 → 清本地列。
+
+    dimensions=None 表示全集（等价于改动前的固定动作）。D12：**未勾选的
+    维度一律不动** —— 整表 DELETE 只在四个维度全勾时才做（§5.10）。
+    """
+    dims = _RESET_DIMENSIONS if dimensions is None else frozenset(dimensions)
+    result: dict = {"unarchived": 0, "untagged_tags": 0, "deleted_tags": 0,
+                    "removed_from_album": 0, "restored_metadata": 0}
+
+    # ① unarchive —— 属「分类」维度（D13：分类 = 归档 + 相册）
+    if "classification" in dims and not is_canceled():
         asset_ids = _archived_asset_ids(db)
         if asset_ids:
             try:
@@ -91,16 +98,15 @@ def run_reset_steps(db: Database, client, *, job_id: int | None,
             except ImmichError as exc:
                 if exc.status_code == 404:
                     log_event(db, "system", "reset_unarchive_404", {
-                        "job_id": job_id, "asset_ids": asset_ids,
-                    })
+                        "job_id": job_id, "asset_ids": asset_ids})
                 else:
                     raise
     if is_canceled():
         result["canceled"] = True
         return result
 
-    # ② 摘管理标签（非破坏性：只摘本系统打过的资产，标签实体保留）
-    if not is_canceled():
+    # ② 摘管理标签 —— 属「标签」维度
+    if "tag" in dims and not is_canceled():
         _, tag_names = reset_preview(db, client)
         existing = {t.name: str(t.id) for t in client.list_tags()}
         asset_map = _tagged_asset_map(db, set(tag_names))
@@ -120,13 +126,170 @@ def run_reset_steps(db: Database, client, *, job_id: int | None,
                     )
             log_event(db, "system", "reset_tag_untagged", {
                 "job_id": job_id, "tag_name": name,
-                "asset_count": len(asset_ids),
-            })
+                "asset_count": len(asset_ids)})
     if is_canceled():
         result["canceled"] = True
         return result
 
-    # ③ 清空 asset_state（change_log / jobs / asset_records 保留）
-    with db.connect() as conn:
-        conn.execute("DELETE FROM asset_state")
+    # ③ 移出相册 —— 同属「分类」维度
+    if "classification" in dims and not is_canceled():
+        result["removed_from_album"] = _remove_from_albums(db, client, job_id)
+    if is_canceled():
+        result["canceled"] = True
+        return result
+
+    # ④ 还原本系统写过的评分/描述（带安全阀，见 _restore_metadata）
+    if (dims & {"rating", "description"}) and not is_canceled():
+        result["restored_metadata"] = _restore_metadata(db, client, dims, job_id)
+    if is_canceled():
+        result["canceled"] = True
+        return result
+
+    # ⑤ 本地 asset_state：列级（仅全勾时才整表 DELETE）
+    _clear_state_columns(db, dims)
     return result
+
+
+def _clear_state_columns(db: Database, dims: frozenset[str]) -> None:
+    """按勾选维度**逐列**清理 asset_state（§5.10）。
+
+    整表 DELETE 会连 current_tag / reviewed / manual_override 一起抹掉，
+    直接违背 D12「未勾选的维度一律不动」——那正是二审揪出来的问题。
+
+    ⚠ rating 与 description 必须**分开**判断：合起来写
+    `if dims & {"rating","description"}: SET rating=NULL, description=NULL`
+    会在只勾「评分」时顺手清掉本地镜像的描述，同样违背 D12。
+    """
+    with db.connect() as conn:
+        if dims >= _RESET_DIMENSIONS:
+            conn.execute("DELETE FROM asset_state")
+            return
+        if "tag" in dims:
+            conn.execute("UPDATE asset_state SET current_tag = NULL, "
+                         "current_markers = '[]'")
+        if "classification" in dims:
+            conn.execute("UPDATE asset_state SET visibility = NULL")
+        if "rating" in dims:
+            conn.execute("UPDATE asset_state SET rating = NULL")
+        if "description" in dims:
+            conn.execute("UPDATE asset_state SET description = NULL")
+        if dims & {"rating", "description"}:
+            # apply_attempts 归「评分/描述」维度的副作用：让"放弃重试"的资产
+            # 恢复可处理（§7.3）。只清这些行，不整表清。
+            conn.execute("UPDATE asset_state SET apply_attempts = 0")
+
+
+def _remove_from_albums(db: Database, client, job_id: int | None) -> int:
+    """把本系统加入过相册的资产移出（D13 的「分类」维度半边）。
+
+    依据 change_log 的 album_add。用 list_albums() 先看相册还在不在 ——
+    不能直接 ensure_album：它会**创建一个空相册**，用户删过的相册就凭空
+    复活了（undo.py:110 有这个问题，本任务不顺手改它，改动面越小越好）。
+    """
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT asset_id, payload FROM change_log "
+            " WHERE action = 'album_add' AND direction = 'apply'").fetchall()
+    by_album: dict[str, list[str]] = {}
+    for row in rows:
+        try:
+            name = json.loads(row["payload"]).get("album_name")
+        except (TypeError, ValueError):
+            continue
+        if name:
+            by_album.setdefault(name, []).append(row["asset_id"])
+    if not by_album:
+        return 0
+
+    existing = {a.album_name: str(a.id) for a in client.list_albums()}
+    removed = 0
+    for name, asset_ids in by_album.items():
+        album_id = existing.get(name)
+        if album_id is None:
+            continue                      # 相册已被用户删掉 → 无需移出
+        client.remove_from_album(album_id, asset_ids)
+        with db.connect() as conn:
+            for aid in asset_ids:
+                conn.execute(
+                    "INSERT INTO change_log (job_id, asset_id, action, "
+                    "direction, payload) "
+                    "VALUES (?, ?, 'album_remove', 'apply', ?)",
+                    (job_id, aid, json.dumps({"album_name": name},
+                                             ensure_ascii=False)))
+        removed += 1
+    return removed
+
+
+def _restore_metadata(db: Database, client, dims: frozenset[str],
+                      job_id: int | None) -> int:
+    """还原本系统写过的评分/描述（§5.10）。
+
+    安全阀：**仅当 Immich 当前值仍等于我们写入的 `new` 时才还原**；
+    用户此后改过（current != last_new）→ 跳过，不抹掉他的编辑。
+    还原目标取**最早一条 apply 记录的 `old`**（＝我们第一次写之前的值）。
+    """
+    from app.classify.snapshot import _val
+
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT asset_id, action, payload FROM change_log "
+            " WHERE direction = 'apply' AND action IN ('rating_set','description_set') "
+            " ORDER BY id").fetchall()
+
+    first_old: dict[tuple[str, str], object] = {}
+    last_new: dict[tuple[str, str], object] = {}
+    for r in rows:
+        try:
+            p = json.loads(r["payload"])
+        except (TypeError, ValueError):
+            continue
+        key = (r["asset_id"], r["action"])
+        first_old.setdefault(key, p.get("old"))
+        last_new[key] = p.get("new")
+
+    restored = 0
+    for (asset_id, action), old in first_old.items():
+        field = "rating" if action == "rating_set" else "description"
+        if field not in dims:
+            continue
+        exif = getattr(client.get_asset(asset_id), "exif_info", None)
+        current = _val(getattr(exif, field, None)) if exif is not None else None
+        if current != last_new[(asset_id, action)]:
+            continue                      # 用户改过 → 不动
+        if field == "rating":
+            client.set_asset_properties([asset_id], rating=old)
+        else:
+            client.set_asset_properties([asset_id], description=old or "")
+        with db.connect() as conn:
+            conn.execute(
+                "INSERT INTO change_log (job_id, asset_id, action, direction, payload) "
+                "VALUES (?, ?, ?, 'undo', ?)",
+                (job_id, asset_id, action,
+                 json.dumps({"old": last_new[(asset_id, action)], "new": old},
+                            ensure_ascii=False)))
+        restored += 1
+    return restored
+
+
+def reset_preview_counts(db: Database) -> dict[str, int]:
+    """四个维度的**预估影响资产数**（§5.10）。
+
+    全部来自本地 SQLite：Immich 没有批量取详情的端点，逐张 GET 在大库上
+    必然 504。精确的安全阀判定只在真正执行时逐张做。
+
+    四个维度统一用 `COUNT(DISTINCT asset_id)` —— 文案是"预估影响 N **张**"，
+    混进"标签名个数"会让用户在两个单位之间对不上。口径也与实际执行一致：
+    «标签» 维度摘的就是 tag_add 记录覆盖的那批资产（`_tagged_asset_map`）。
+    """
+    with db.connect() as conn:
+        def assets(action: str) -> int:
+            return conn.execute(
+                "SELECT COUNT(DISTINCT asset_id) c FROM change_log "
+                " WHERE action = ? AND direction = 'apply'", (action,),
+            ).fetchone()["c"]
+        return {
+            "tag": assets("tag_add"),
+            "classification": assets("archive"),
+            "rating": assets("rating_set"),
+            "description": assets("description_set"),
+        }

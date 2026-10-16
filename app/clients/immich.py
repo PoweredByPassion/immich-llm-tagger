@@ -161,6 +161,10 @@ class ImmichClient:
     def get_asset(self, asset_id: str) -> AssetResponseDto:
         return self._run(_get_asset_info.sync_detailed, id=asset_id).parsed
 
+    def list_albums(self) -> list[AlbumResponseDto]:
+        """全部相册（不带 name 过滤）。"""
+        return self._run(_get_all_albums.sync_detailed).parsed or []
+
     def iter_assets(
         self, dto: MetadataSearchDto, size: int = 1000
     ) -> Iterator[AssetResponseDto]:

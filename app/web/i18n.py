@@ -475,6 +475,13 @@ _DICTIONARY: dict[str, dict[str, str]] = {
     "danger.confirm_input_1": {"zh": "输入 ", "en": "Type "},
     "danger.confirm_input_2": {"zh": " 以确认", "en": " to confirm"},
     "danger.execute": {"zh": "执行重置", "en": "Execute Reset"},
+    "danger.dimension.tag": {"zh": "标签（摘除本系统打过的标签）", "en": "Tags (remove tags this system applied)"},
+    "danger.dimension.classification": {"zh": "分类（取消归档并移出相册）", "en": "Classification (unarchive and remove from albums)"},
+    "danger.dimension.rating": {"zh": "评分（还原本系统写入的评分）", "en": "Rating (restore ratings this system wrote)"},
+    "danger.dimension.description": {"zh": "描述（还原本系统写入的描述）", "en": "Description (restore descriptions this system wrote)"},
+    "danger.no_dimension": {"zh": "请至少勾选一个要重置的维度", "en": "Select at least one dimension to reset"},
+    "danger.confirm2": {"zh": "再次输入 RESET 以二次确认", "en": "Type RESET again to double-confirm"},
+    "danger.preview_footnote": {"zh": "预估影响 %s 张（执行时将跳过你之后手工改动过的项目）", "en": "Estimated impact: %s items (items you edited manually afterwards are skipped)"},
     # --- 通用确认弹层 ---
     "confirm.default_title": {"zh": "确认操作", "en": "Confirm action"},
     "confirm.default_body":  {"zh": "确定要执行此操作吗？该操作不可撤销。", "en": "Are you sure? This action cannot be undone."},

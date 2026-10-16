@@ -2,6 +2,13 @@
 {% block title %}{{ tr("nav.danger") }} - Immich LLM Tagger{% endblock %}
 {% block page_title %}{{ tr("nav.danger") }}{% endblock %}
 {% block content %}
+{% set _dims = [
+  ("tag", "danger.dimension.tag", preview_counts.tag),
+  ("classification", "danger.dimension.classification", preview_counts.classification),
+  ("rating", "danger.dimension.rating", preview_counts.rating),
+  ("description", "danger.dimension.description", preview_counts.description),
+] %}
+{% set _dim_total = preview_counts.tag + preview_counts.classification + preview_counts.rating + preview_counts.description %}
 <div class="space-y-6">
   <div>
     <h1 class="text-xl font-semibold tracking-tight text-[#f1f3f9]">{{ tr("nav.danger") }}</h1>
@@ -32,21 +39,6 @@
     </div>
     {% endif %}
 
-    <div class="mb-5 grid grid-cols-2 sm:grid-cols-4 gap-4 p-4 rounded-[6px] bg-[#090a0f] border border-[#20232d]">
-      <div>
-        <p class="num text-3xl font-semibold tabular-nums text-rose-400 leading-none mb-1.5">{{ unarchive_count }}</p>
-        <p class="text-xs text-[#8a8f98]">{{ tr("danger.stat.unarchive") }}</p>
-      </div>
-      <div>
-        <p class="num text-3xl font-semibold tabular-nums text-rose-400 leading-none mb-1.5">{{ tag_names | length }}</p>
-        <p class="text-xs text-[#8a8f98]">{{ tr("danger.stat.tags") }}</p>
-      </div>
-    </div>
-
-    {% if tag_names %}
-    <p class="num mb-4 text-xs text-[#8a8f98] font-mono">{{ tr("danger.tags_prefix") }}{{ tag_names | join(tr("common.list_sep")) }}</p>
-    {% endif %}
-
     <p class="mb-6 text-xs text-rose-300/90 leading-relaxed border-l-2 border-rose-500/40 pl-3 py-0.5">
       <strong>{{ tr("danger.note_strong") }}</strong>{{ tr("danger.note_rest") }}
     </p>
@@ -60,15 +52,34 @@
     <div x-show="confirmOpen && !{{ 'true' if has_active else 'false' }}" x-cloak
          class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm px-4"
          role="dialog" aria-modal="true">
-      <div class="w-full max-w-sm rounded-[6px] border border-rose-900/50 bg-[#13151c] p-6 shadow-2xl">
+      <div class="w-full max-w-md rounded-[6px] border border-rose-900/50 bg-[#13151c] p-6 shadow-2xl">
         <h2 class="mb-2 text-sm font-semibold text-rose-300">{{ tr("danger.confirm_title") }}</h2>
-        <p class="mb-4 text-xs text-[#8a8f98] leading-relaxed">
-          {{ tr("danger.confirm_body_1") }}<span class="num text-[#f1f3f9] font-medium">{{ unarchive_count }}</span>{{ tr("danger.confirm_body_2") }}<span class="num text-[#f1f3f9] font-medium">{{ tag_names | length }}</span>{{ tr("danger.confirm_body_3") }}
-        </p>
-        <form method="post" action="/danger/reset">
-          <label for="confirm" class="mb-1.5 block text-xs text-[#8a8f98]">{{ tr("danger.confirm_input_1") }}<span class="num text-rose-300 font-mono font-medium">RESET</span>{{ tr("danger.confirm_input_2") }}</label>
-          <input type="text" id="confirm" name="confirm" autocomplete="off"
-                 class="input w-full text-xs h-9 mb-4 font-mono focus:border-rose-500" placeholder="RESET">
+        <form method="post" action="/danger/reset" class="space-y-4">
+          <fieldset class="space-y-2 rounded-[6px] bg-[#090a0f] border border-[#20232d] p-4">
+            {% for value, key, count in _dims %}
+            <label class="flex items-center justify-between gap-3 text-xs text-[#c7ccd6] cursor-pointer">
+              <span class="flex items-center gap-2">
+                <input type="checkbox" name="dimensions" value="{{ value }}"
+                       class="h-4 w-4 rounded border-[#3a3f4b] bg-[#13151c] text-rose-500 focus:ring-rose-500/40">
+                <span>{{ tr(key) }}</span>
+              </span>
+              <span class="num font-mono text-[#8a8f98]">{{ count }}</span>
+            </label>
+            {% endfor %}
+          </fieldset>
+          <p class="text-xs text-[#8a8f98] leading-relaxed">{{ tr("danger.preview_footnote") % _dim_total }}</p>
+
+          <div>
+            <label for="confirm" class="mb-1.5 block text-xs text-[#8a8f98]">{{ tr("danger.confirm_input_1") }}<span class="num text-rose-300 font-mono font-medium">RESET</span>{{ tr("danger.confirm_input_2") }}</label>
+            <input type="text" id="confirm" name="confirm" autocomplete="off"
+                   class="input w-full text-xs h-9 font-mono focus:border-rose-500" placeholder="RESET">
+          </div>
+          <div>
+            <label for="confirm2" class="mb-1.5 block text-xs text-[#8a8f98]">{{ tr("danger.confirm2") }}</label>
+            <input type="text" id="confirm2" name="confirm2" autocomplete="off"
+                   class="input w-full text-xs h-9 font-mono focus:border-rose-500" placeholder="RESET">
+          </div>
+
           <div class="flex justify-end gap-2">
             <button type="button" @click="confirmOpen = false"
                     class="btn btn-secondary text-xs h-8 px-3">{{ tr("config.common.cancel") }}</button>
