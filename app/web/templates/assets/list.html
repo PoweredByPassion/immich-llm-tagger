@@ -67,24 +67,63 @@
     </div>
   </form>
 
+  <!-- 正在识别（活租约）：这些图还没有记录行，单独一组展示，不可点进详情 -->
+  {% if in_flight %}
+  <div class="rounded border border-[#5e6ad2]/30 bg-[#5e6ad2]/5 p-4 space-y-3">
+    <div class="flex flex-wrap items-center gap-2">
+      <span class="relative flex h-2 w-2">
+        <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#6f7be8] opacity-75"></span>
+        <span class="relative inline-flex rounded-full h-2 w-2 bg-[#5e6ad2]"></span>
+      </span>
+      <h2 class="text-sm font-semibold text-[#f1f3f9]">{{ tr("assets.inflight.title") % (in_flight | length) }}</h2>
+      <span class="text-xs text-[#8a8f98]">{{ tr("assets.inflight.hint") }}</span>
+    </div>
+    <div class="flex flex-wrap gap-3">
+      {% for a in in_flight %}
+      <div class="w-20 space-y-1.5" title="{{ a.asset_id }}">
+        <div class="w-20 h-20 rounded bg-[#181b24] overflow-hidden border border-[#20232d] flex items-center justify-center text-zinc-500">
+          <img src="/assets/{{ a.asset_id }}/thumb" alt="" loading="lazy"
+               class="w-full h-full object-cover">
+        </div>
+        <div class="text-[11px] font-mono text-zinc-500 truncate">{{ a.asset_id[:8] }}</div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
   <!-- 图片卡片网格布局 -->
   {% if records %}
   <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
     {% for r in records %}
-    <div class="p-5 rounded bg-[#13151c] border border-[#20232d] hover:border-[#282c39] transition space-y-4">
+    <div class="relative p-5 rounded bg-[#13151c] border border-[#20232d] hover:border-[#282c39] transition space-y-4">
+      <!-- 右上角：跳转 Immich 对应图片（未配服务器时不渲染，避免死链） -->
+      {% if r.immich_url %}
+      <a href="{{ r.immich_url }}" target="_blank" rel="noopener noreferrer"
+         title="{{ tr('assets.card.open_immich') }}" aria-label="{{ tr('assets.card.open_immich') }}"
+         class="absolute top-3 right-3 p-1.5 rounded text-zinc-500 hover:text-[#8f9bff] hover:bg-[#181b24] transition">
+        <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 6H18v4.5M17.4 6.6l-6.9 6.9M15 12.75V17.25A1.75 1.75 0 0113.25 19H6.75A1.75 1.75 0 015 17.25V10.75A1.75 1.75 0 016.75 9H11.25"/>
+        </svg>
+      </a>
+      {% endif %}
       <div class="flex items-start gap-4">
-        <!-- 缩略图：真实缩略图，失败回落占位图标 -->
-        <div class="w-20 h-20 rounded bg-[#181b24] flex-shrink-0 overflow-hidden relative border border-[#20232d] flex items-center justify-center text-zinc-500">
+        <!-- 缩略图：点击弹大图（preview 尺寸）；失败回落占位图标 -->
+        <button type="button" data-asset-id="{{ r.asset_id }}"
+                onclick="openLightbox(this.dataset.assetId)"
+                title="{{ tr('assets.card.enlarge') }}"
+                aria-label="{{ tr('assets.card.enlarge') }}"
+                class="w-20 h-20 rounded bg-[#181b24] flex-shrink-0 overflow-hidden relative border border-[#20232d] flex items-center justify-center text-zinc-500 cursor-zoom-in hover:border-[#5e6ad2] transition">
           <img src="/assets/{{ r.asset_id }}/thumb" alt="" loading="lazy"
                class="w-full h-full object-cover"
                onerror="this.classList.add('hidden');this.nextElementSibling.classList.remove('hidden');">
           <svg class="w-10 h-10 text-zinc-500 hidden" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/>
           </svg>
-        </div>
+        </button>
 
         <!-- 资产信息 -->
-        <div class="flex-1 min-w-0">
+        <div class="flex-1 min-w-0{% if r.immich_url %} pr-7{% endif %}">
           <a href="/assets/{{ r.asset_id }}" class="text-sm font-semibold text-zinc-100 hover:text-[#5e6ad2] truncate block" title="{{ r.asset_id }}">
             {{ r.filename or "#" ~ r.asset_id[:8] }}
           </a>
@@ -95,12 +134,24 @@
             {% endif %}
           </div>
           
-          <!-- 标签胶囊 -->
+          <!-- 标签胶囊：预测（LLM 本次判定）与实际（Immich 现挂）分开上色，
+               避免「标签被忽略 → current_tag 为空 → 卡片什么都看不到」。
+               未打标签的资产也能看到模型预测了什么。 -->
           <div class="flex flex-wrap gap-1.5 mt-2.5">
-            {% if r.current_tag %}
-            <span class="px-2 py-0.5 rounded bg-[#181b24] text-zinc-200 text-xs border border-[#20232d] font-medium">{{ r.current_tag }}</span>
+            {% if r.predicted_tag %}
+            <span class="px-2 py-0.5 rounded bg-[#5e6ad2]/15 text-[#8f9bff] text-xs border border-[#5e6ad2]/40 font-medium"
+                  title="{{ tr('assets.card.predicted_title') }}">{{ tr("assets.card.predicted") }} · {{ r.predicted_tag }}</span>
             {% else %}
-            <span class="px-2 py-0.5 rounded bg-[#181b24] text-zinc-500 text-xs border border-[#20232d]">{{ tr("assets.card.untagged") }}</span>
+            <span class="px-2 py-0.5 rounded bg-[#181b24] text-zinc-600 text-xs border border-[#20232d]"
+                  title="{{ tr('assets.card.predicted_title') }}">{{ tr("assets.card.predicted") }} · —</span>
+            {% endif %}
+
+            {% if r.current_tag %}
+            <span class="px-2 py-0.5 rounded bg-[#181b24] text-zinc-200 text-xs border border-[#20232d] font-medium"
+                  title="{{ tr('assets.card.actual_title') }}">{{ tr("assets.card.actual") }} · {{ r.current_tag }}</span>
+            {% else %}
+            <span class="px-2 py-0.5 rounded bg-[#181b24] text-zinc-500 text-xs border border-[#20232d]"
+                  title="{{ tr('assets.card.actual_title') }}">{{ tr("assets.card.actual") }} · {{ tr("assets.card.untagged") }}</span>
             {% endif %}
 
             {% if r.visibility and r.visibility != 'timeline' %}
@@ -152,5 +203,36 @@
   </div>
   {% endif %}
 
+  <!-- 大图弹层：点击卡片缩略图打开（preview 尺寸），点背景或 Esc 关闭。
+       <img> 只在打开时才设 src，关闭即清空，避免常驻拉大图。 -->
+  <div id="lightbox" hidden
+       class="fixed inset-0 z-50 items-center justify-center bg-black/85 backdrop-blur-sm p-4 cursor-zoom-out"
+       onclick="closeLightbox()" role="dialog" aria-modal="true">
+    <img id="lightbox-img" src="" alt=""
+         class="max-h-full max-w-full rounded object-contain shadow-2xl">
+  </div>
+
 </div>
+
+<script>
+function openLightbox(assetId) {
+  const box = document.getElementById("lightbox");
+  const img = document.getElementById("lightbox-img");
+  if (!box || !img || !assetId) return;
+  img.src = "/assets/" + encodeURIComponent(assetId) + "/preview";
+  box.hidden = false;
+  box.classList.add("flex");
+}
+function closeLightbox() {
+  const box = document.getElementById("lightbox");
+  const img = document.getElementById("lightbox-img");
+  if (!box || !img) return;
+  box.hidden = true;
+  box.classList.remove("flex");
+  img.src = "";
+}
+document.addEventListener("keydown", function (e) {
+  if (e.key === "Escape") closeLightbox();
+});
+</script>
 {% endblock %}

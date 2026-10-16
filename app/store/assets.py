@@ -189,6 +189,26 @@ def current_tag_counts(db: Database) -> dict[str, int]:
     return {row["current_tag"]: row["n"] for row in rows}
 
 
+def in_flight_assets(db: Database, *, limit: int = 24) -> list[dict]:
+    """此刻正在被 worker 分类的资产（活租约未过期）。
+
+    「正在识别」= asset_state.lease_owner 非空且 lease_expires_at > now
+    （见 app/classify/lease.py）。这些图还没有 asset_records 行，因此不在
+    记录列表里 —— 列表页单独取一小组展示，让用户看到"正在跑"。
+    租约过期（worker 崩了）的会自动被排除，不会长期挂着误导用户。
+    """
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT asset_id, current_tag FROM asset_state "
+            " WHERE lease_owner IS NOT NULL "
+            "   AND lease_expires_at IS NOT NULL "
+            "   AND lease_expires_at > datetime('now') "
+            " ORDER BY updated_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def get_record(db: Database, record_id: int) -> dict | None:
     """单条记录，字段全（含 markers/usage 解析）。不存在返回 None。"""
     with db.connect() as conn:

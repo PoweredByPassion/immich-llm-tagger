@@ -300,6 +300,7 @@ class _FakeClient:
     asset = None
     thumbnail = b"\xff\xd8\xff\xe0THUMB-JPEG"
     thumb_error = None  # None 或 status_code
+    sizes: list[str] = []  # fetch_thumbnail_bytes 收到的 size，按调用顺序
 
     def __init__(self, *, base_url, api_key, verify_ssl, timeout, **kw):
         assert timeout == 30.0 or timeout > 0
@@ -312,6 +313,7 @@ class _FakeClient:
         return _FakeClient.asset
 
     def fetch_thumbnail_bytes(self, asset_id, size="preview"):
+        _FakeClient.sizes.append(size)
         if _FakeClient.thumb_error is not None:
             raise assets_ui_module.ImmichError("thumb fail", _FakeClient.thumb_error)
         return _FakeClient.thumbnail
@@ -321,6 +323,7 @@ class _FakeClient:
         cls.asset = None
         cls.thumb_error = None
         cls.thumbnail = b"\xff\xd8\xff\xe0THUMB-JPEG"
+        cls.sizes = []
         assets_ui_module._fake_instances = []
 
 
@@ -718,3 +721,95 @@ def test_list_renders_created_at_and_thumb_img(client):
     assert "2026-10-12 08:00:00" in html
     assert f'src="/assets/{ASSET_ID}/thumb"' in html
     assert 'loading="lazy"' in html
+
+
+# ---------------------------------- 任务 7: 正在识别 / 预测vs实际 / 大图预览
+
+def _insert_lease(db, asset_id: str, *, seconds: int = 600) -> None:
+    """造一张"正在识别"的资产：asset_state 有未过期的活租约。"""
+    sign = "+" if seconds >= 0 else "-"
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO asset_state (asset_id, lease_owner, lease_expires_at) "
+            "VALUES (?, 1, datetime('now', ?))",
+            (asset_id, f"{sign}{abs(seconds)} seconds"),
+        )
+
+
+def test_list_shows_in_flight_assets_not_clickable(client):
+    """活租约的资产出现在「正在识别」带里，但不给详情链接（无记录可看）。"""
+    c, db = client
+    _insert_lease(db, "asset-inflight")
+    html = c.get("/assets").text
+    assert "asset-inflight" in html
+    assert "正在识别 1 张" in html
+    assert 'href="/assets/asset-inflight"' not in html
+
+
+def test_list_in_flight_requires_live_lease(client):
+    """租约已过期（worker 崩了）不算在飞，不会长期挂着误导用户。"""
+    c, db = client
+    _insert_lease(db, "asset-expired", seconds=-60)
+    html = c.get("/assets").text
+    assert "asset-expired" not in html
+    assert "正在识别 1 张" not in html
+
+
+def test_list_hides_in_flight_when_filtered(client):
+    """带记录筛选时不给在飞带：它们没有记录行，套不上任何按记录的筛选。"""
+    c, db = client
+    _insert_lease(db, "asset-inflight")
+    _insert_record(db, "a1", status="ok")
+    html = c.get("/assets", params={"status": "ok"}).text
+    assert "asset-inflight" not in html
+
+
+def test_list_shows_predicted_and_actual_tags_distinctly(client):
+    """标签被忽略导致 current_tag 为空时，仍能看到 LLM 预测了什么。"""
+    c, db = client
+    _insert_record(db, "a1", predicted_tag="风景")
+    _insert_state(db, "a1", current_tag=None)
+    html = c.get("/assets").text
+    assert "预测 · 风景" in html
+    assert "实际 · 未分类" in html
+
+
+def test_list_marks_actual_tag_when_present(client):
+    c, db = client
+    _insert_record(db, "a1", predicted_tag="风景")
+    _insert_state(db, "a1", current_tag="人像")
+    html = c.get("/assets").text
+    assert "预测 · 风景" in html
+    assert "实际 · 人像" in html
+
+
+def test_preview_route_requests_preview_size(client, mock_client):
+    """点图放大走 preview 尺寸（列表缩略图仍是 thumbnail）。"""
+    c, db = client
+    ConnectionStore(db).set_immich(
+        ImmichConn(url="http://immich.example", api_key="k")
+    )
+    mock_client.thumbnail = b"\xff\xd8\xff\xe0PREVIEW-JPEG"
+    resp = c.get(f"/assets/{ASSET_ID}/preview")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "image/jpeg"
+    assert resp.content == b"\xff\xd8\xff\xe0PREVIEW-JPEG"
+    assert mock_client.sizes == ["preview"]
+
+
+def test_preview_no_connection_returns_404(client, mock_client):
+    c, _ = client
+    resp = c.get(f"/assets/{ASSET_ID}/preview")
+    assert resp.status_code == 404
+    assert assets_ui_module._fake_instances == []
+
+
+def test_list_renders_lightbox_hooks(client):
+    c, db = client
+    _insert_record(db, ASSET_ID)
+    html = c.get("/assets").text
+    assert 'id="lightbox"' in html
+    assert 'id="lightbox-img"' in html
+    assert "openLightbox" in html
+    assert f'data-asset-id="{ASSET_ID}"' in html
+
