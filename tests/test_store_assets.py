@@ -431,3 +431,35 @@ def test_bumped_apply_attempts_keeps_existing_state(db: Database) -> None:
     assert state["current_tag"] == "pets"
     assert state["visibility"] == "ARCHIVED"
     assert state["apply_attempts"] == 1
+
+
+# ---------- has_system_archive ----------
+# 语义源自 tests/test_classify_apply.py（Task 9 随 apply_plan 一起删除）：
+#   「本系统归档过」= action='archive' AND direction='apply'。
+
+def test_has_system_archive_true_for_apply_row(db: Database) -> None:
+    with db.connect() as conn:
+        _insert_archive(conn, "a1")
+    assert store_assets.has_system_archive(db, "a1") is True
+
+
+def test_has_system_archive_ignores_undo_rows(db: Database) -> None:
+    """direction='undo' 的归档记录不算"本系统归档过"（撤销后不该再被拉回）。"""
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO change_log (asset_id, action, direction) "
+            "VALUES ('a1', 'archive', 'undo')")
+    assert store_assets.has_system_archive(db, "a1") is False
+
+
+def test_has_system_archive_false_for_timeline_apply_row(db: Database) -> None:
+    """timeline/apply 记录不算归档过 —— 否则会被反复误拉回 timeline。"""
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO change_log (asset_id, action, direction) "
+            "VALUES ('a1', 'timeline', 'apply')")
+    assert store_assets.has_system_archive(db, "a1") is False
+
+
+def test_has_system_archive_false_when_absent(db: Database) -> None:
+    assert store_assets.has_system_archive(db, "a1") is False

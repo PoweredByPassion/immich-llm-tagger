@@ -21,16 +21,20 @@ def _ctx(**kw):
     )
 
 
-def _plan(ctx=None, *, last_written=None):
+def _plan(ctx=None, *, last_written=None, has_system_archive=False):
     """返回 (effects, outcome)。outcome 必须由测试自己持有才算得清 skipped。"""
     outcome = PlanOutcome()
     effects = plan_all(ctx or _ctx(), last_written=last_written or {},
-                       outcome=outcome)
+                       outcome=outcome, has_system_archive=has_system_archive)
     return effects, outcome
 
 
 def _ratings(effects):
     return [e for e in effects if e.action == "rating_set"]
+
+
+def _visibility(effects):
+    return [e for e in effects if e.action in ("archive", "timeline")]
 
 
 def test_rating_written_when_empty():
@@ -91,3 +95,73 @@ def test_description_skipped_when_user_wrote_it():
     effects, outcome = _plan(_ctx(snapshot=AssetSnapshot(description="我写的")))
     assert not [e for e in effects if e.action == "description_set"]
     assert "description" in outcome.skipped
+
+
+# ---------------------------------------------------- visibility planner
+# 语义源自 tests/test_classify_apply.py（Task 9 随 apply_plan 一起删除）：
+#   · archive=True 且非 archive → archive（from=当前值）
+#   · archive=False 且 has_system_archive 且非 timeline → timeline（from=当前值）
+#   · 已是目标可见性 / 无本系统归档史 → 不产出（用户自行归档不被还原）
+
+
+def test_visibility_archive_branch_from_current():
+    effects, _ = _plan(_ctx(archive=True,
+                            snapshot=AssetSnapshot(visibility="timeline")))
+    vis = _visibility(effects)
+    assert len(vis) == 1
+    assert vis[0].action == "archive"
+    assert vis[0].payload == {"from_visibility": "timeline"}
+
+
+def test_visibility_archive_defaults_from_timeline():
+    """当前可见性未知（None）→ from 兜底 timeline。"""
+    effects, _ = _plan(_ctx(archive=True))          # snapshot visibility=None
+    assert _visibility(effects)[0].payload == {"from_visibility": "timeline"}
+
+
+def test_visibility_timeline_branch_with_system_archive():
+    """本系统归档过 → archive=False 且当前非 timeline → 拉回 timeline。"""
+    effects, _ = _plan(
+        _ctx(archive=False, snapshot=AssetSnapshot(visibility="archive")),
+        has_system_archive=True)
+    vis = _visibility(effects)
+    assert len(vis) == 1
+    assert vis[0].action == "timeline"
+    assert vis[0].payload == {"from_visibility": "archive"}
+
+
+def test_visibility_timeline_defaults_from_archive():
+    effects, _ = _plan(_ctx(archive=False),        # snapshot visibility=None
+                       has_system_archive=True)
+    assert _visibility(effects)[0].payload == {"from_visibility": "archive"}
+
+
+def test_visibility_noop_when_already_archive():
+    """archive=True 但当前已是 archive → 不产出（不做无用写入）。"""
+    effects, _ = _plan(_ctx(archive=True,
+                            snapshot=AssetSnapshot(visibility="archive")))
+    assert _visibility(effects) == []
+
+
+def test_visibility_noop_when_already_timeline():
+    """has_system_archive 但当前已是 timeline → 不产出。"""
+    effects, _ = _plan(
+        _ctx(archive=False, snapshot=AssetSnapshot(visibility="timeline")),
+        has_system_archive=True)
+    assert _visibility(effects) == []
+
+
+def test_visibility_no_timeline_without_system_archive():
+    """无本系统归档史 → 即使当前是 archive 也不拉回 timeline
+    （用户自行归档的图不被还原）。"""
+    effects, _ = _plan(
+        _ctx(archive=False, snapshot=AssetSnapshot(visibility="archive")),
+        has_system_archive=False)
+    assert [e for e in effects if e.action == "timeline"] == []
+
+
+def test_visibility_disabled_produces_nothing():
+    effects, _ = _plan(_ctx(archive=True, enabled={"tag"}),
+                       has_system_archive=True)
+    assert _visibility(effects) == []
+
