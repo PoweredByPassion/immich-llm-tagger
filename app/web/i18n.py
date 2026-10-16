@@ -241,6 +241,10 @@ _DICTIONARY: dict[str, dict[str, str]] = {
     "config.transfer.confirm_import_body": {"zh": "将覆盖现有全部配置，确定继续吗？", "en": "This will overwrite all existing configuration. Continue?"},
     # --- 配置中心：处理范围 ---
     "config.scope.desc": {"zh": "控制自动分类适用的 Immich 库与图片路径。未配置任何规则时，所有资产均在处理范围内。", "en": "Control which Immich libraries and image paths auto-classification applies to. With no rules configured, all assets are in scope."},
+    "config.scope.section_heading": {"zh": "处理范围（要处理的）", "en": "Processing Scope (what to process)"},
+    "config.exclusions.section_heading": {"zh": "排除规则（不处理的）", "en": "Exclusions (what to skip)"},
+    "config.filters.include_badge": {"zh": "包含", "en": "include"},
+    "config.filters.exclude_badge": {"zh": "排除", "en": "exclude"},
     "config.scope.backfill_active":  {"zh": "回填任务进行中", "en": "Backfill in progress"},
     "config.scope.backfill":         {"zh": "全量回填", "en": "Full backfill"},
     "config.scope.backfill_confirm": {"zh": "将为范围内未处理图片入队，完成后下次触发（轮询或 webhook）将处理新入队图片。确定吗？", "en": "This enqueues unprocessed images in scope; the next trigger (polling or webhook) will process the newly enqueued images. Continue?"},
