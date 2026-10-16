@@ -1042,3 +1042,39 @@ def test_give_up_does_not_reset_applied_at(db: Database) -> None:
     with db.connect() as conn:
         assert conn.execute("SELECT applied_at FROM asset_records").fetchone()[
             "applied_at"] is None
+
+
+# ------------------------------------- Task 11: 重试复用分析结果（§7.3 层 1）
+
+
+def test_retry_reuses_stored_analysis_without_llm(db: Database) -> None:
+    """已有 status='ok' 且 applied_at IS NULL 的记录 → 不再调 LLM（§7.3 层 1）。"""
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO asset_records (asset_id, source, status, dry_run, "
+            "  predicted_tag, confidence, markers, rating, description, filename) "
+            "VALUES ('asset-1','poll','ok',0,'cat',0.9,'[]',4,'一只猫','IMG_0001.png')")
+    client = FakeClient()
+    llm = FakeLLM([RATING_JSON])        # 一旦被调用就说明复用没生效
+
+    classify_asset(db, client, llm, "asset-1", make_cfg(), source="poll", job_id=2)
+
+    assert llm.calls == []                                  # 零 LLM 成本
+    assert client.set_props_calls == [{"rating": 4, "description": "一只猫"}]
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT applied_at FROM asset_records WHERE asset_id='asset-1'"
+        ).fetchall()
+    assert len(rows) == 1 and rows[0]["applied_at"] is not None   # §6.5：不新增行，只盖章
+
+
+def test_reuse_does_not_take_refused_or_applied_records(db: Database) -> None:
+    """status='refused' / applied_at 非空 都不是可复用对象。"""
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO asset_records (asset_id, source, status, dry_run, "
+            "  predicted_tag, confidence, markers) "
+            "VALUES ('asset-1','poll','refused',0,'other',NULL,'[\"sensitive\"]')")
+    llm = FakeLLM([RATING_JSON])
+    classify_asset(db, FakeClient(), llm, "asset-1", make_cfg(), source="poll")
+    assert len(llm.calls) == 1                              # 照常分析

@@ -170,61 +170,55 @@ def _process(db, client, llm, asset_id, cfg, *, source, dry_run, job_id,
     # 取图/渲染 prompt 阶段就失败时没有请求可记，error 路径留 None。
     request_snapshot: str | None = None
     filename = None
-    try:
-        # 未勾选多模态：不发图，也省掉一次取图（fetch_and_encode）。
-        image_b64 = fetch_and_encode(client, asset_id, cfg.thumb) \
-            if cfg.llm.multimodal else None
-        filename, exif, date = _asset_meta(client, asset_id, asset_hint)
-        primary = [(t.name, t.description) for t in cfg.tags
-                   if t.kind == "primary" and t.enabled]
-        prompt = render_prompt(cfg.prompt_template, PromptContext(
-            tag_list=primary, filename=filename, exif=exif, scope=None, date=date,
-        ))
-        messages = _messages(prompt, image_b64)
-        request_snapshot = _llm_request_snapshot(llm, messages)
-        result = llm.chat(messages)
-        renew(db, asset_id, cfg.concurrency_owner, lease_seconds)  # 每次 LLM 成功续租
-    except Exception:
-        _write_record(db, asset_id, source=source, tag=None, confidence=None,
-                      markers=(), model=None, usage=None, status="error",
-                      raw_response=None, llm_request=request_snapshot,
+    # 重试复用（§7.3 层 1）：已有"分析成功但未应用"的记录时跳过 LLM。
+    reused = _reusable_analysis(db, asset_id) if not dry_run else None
+    if reused is not None:
+        cls, status, filename = reused["cls"], "ok", reused["filename"]
+    else:
+        try:
+            # 未勾选多模态：不发图，也省掉一次取图（fetch_and_encode）。
+            image_b64 = fetch_and_encode(client, asset_id, cfg.thumb) \
+                if cfg.llm.multimodal else None
+            filename, exif, date = _asset_meta(client, asset_id, asset_hint)
+            primary = [(t.name, t.description) for t in cfg.tags
+                       if t.kind == "primary" and t.enabled]
+            prompt = render_prompt(cfg.prompt_template, PromptContext(
+                tag_list=primary, filename=filename, exif=exif, scope=None,
+                date=date,
+            ))
+            messages = _messages(prompt, image_b64)
+            request_snapshot = _llm_request_snapshot(llm, messages)
+            result = llm.chat(messages)
+            renew(db, asset_id, cfg.concurrency_owner, lease_seconds)
+        except Exception:
+            _write_record(db, asset_id, source=source, tag=None, confidence=None,
+                          markers=(), model=None, usage=None, status="error",
+                          raw_response=None, llm_request=request_snapshot,
+                          dry_run=dry_run, job_id=job_id,
+                          prompt_version_id=prompt_version_id,
+                          duration_ms=_ms(started), filename=filename)
+            return _error_result(asset_id, dry_run)
+
+        raw_text = result.content
+        # extract_json 故意**不**套 try：解析期异常由 classify_asset 统一兜成
+        # error（既有语义，test_post_llm_crash_becomes_error_and_releases 钉着）。
+        raw = extract_json(raw_text)
+        # raw is None 的两种情形（真拒答 / 不合契约）归一结果完全一致，
+        # 原来分成两个分支是冗余，这里合并。
+        cls = normalize(raw, refusal_text=None if raw is not None else raw_text,
+                        enabled_primary_tags={n for n, _ in _primary_names(cfg)},
+                        fallback_tag=cfg.fallback_tag,
+                        marker_rules=cfg.marker_rules)
+        status = "ok" if raw is not None else "refused"
+
+        _write_record(db, asset_id, source=source, tag=cls.tag,
+                      confidence=cls.confidence, markers=cls.markers,
+                      model=result.model, usage=result.usage, status=status,
+                      raw_response=raw_text, llm_request=request_snapshot,
                       dry_run=dry_run, job_id=job_id,
                       prompt_version_id=prompt_version_id,
-                      duration_ms=_ms(started), filename=filename)
-        return _error_result(asset_id, dry_run)
-
-    raw_text = result.content
-    raw = extract_json(raw_text)
-    if raw is None and _is_refusal(raw_text):
-        cls = normalize(None, refusal_text=raw_text,
-                        enabled_primary_tags={n for n, _ in _primary_names(cfg)},
-                        fallback_tag=cfg.fallback_tag,
-                        marker_rules=cfg.marker_rules)
-        status = "refused"
-    elif raw is None:
-        # 非拒答也解析不出 JSON：按拒答归一（sensitive marker + fallback），
-        # 状态记 refused（LLM 给了正文但不符合输出契约）。
-        cls = normalize(None, refusal_text=raw_text,
-                        enabled_primary_tags={n for n, _ in _primary_names(cfg)},
-                        fallback_tag=cfg.fallback_tag,
-                        marker_rules=cfg.marker_rules)
-        status = "refused"
-    else:
-        cls = normalize(raw, refusal_text=None,
-                        enabled_primary_tags={n for n, _ in _primary_names(cfg)},
-                        fallback_tag=cfg.fallback_tag,
-                        marker_rules=cfg.marker_rules)
-        status = "ok"
-
-    duration_ms = _ms(started)
-    _write_record(db, asset_id, source=source, tag=cls.tag,
-                  confidence=cls.confidence, markers=cls.markers,
-                  model=result.model, usage=result.usage, status=status,
-                  raw_response=raw_text, llm_request=request_snapshot,
-                  dry_run=dry_run, job_id=job_id,
-                  prompt_version_id=prompt_version_id, duration_ms=duration_ms,
-                  filename=filename, rating=cls.rating,
-                  description=cls.description)
+                      duration_ms=_ms(started), filename=filename,
+                      rating=cls.rating, description=cls.description)
 
     if dry_run:
         return PipelineResult(asset_id=asset_id, tag=cls.tag,
@@ -434,3 +428,34 @@ def _write_record(db, asset_id, *, source, tag, confidence, markers, model, usag
                 "rating": rating, "desc": description,
             },
         )
+
+
+def _reusable_analysis(db, asset_id: str):
+    """重试复用：返回上次已分析但未应用的判定（§7.3 层 1）。
+
+    只在**最新一条记录**满足 `status='ok' AND dry_run=0 AND applied_at IS NULL`
+    时复用：
+      · status='error'/'refused' → 没有可用判定
+      · applied_at 非空 → 那条已被应用过，复用它等于拿旧结果盖新状态
+    """
+    from app.classify.parse import Classification
+
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT status, predicted_tag, confidence, markers, rating, "
+            "       description, filename, applied_at "
+            "  FROM asset_records WHERE asset_id = ? AND dry_run = 0 "
+            " ORDER BY created_at DESC, id DESC LIMIT 1",
+            (asset_id,),
+        ).fetchone()
+    if (row is None or row["status"] != "ok"
+            or row["applied_at"] is not None
+            or row["predicted_tag"] is None):
+        return None
+    markers = json.loads(row["markers"] or "[]")
+    cls = Classification(
+        tag=row["predicted_tag"], confidence=row["confidence"],
+        sensitive="sensitive" in markers, reason=None, markers=tuple(markers),
+        rating=row["rating"], description=row["description"],
+    )
+    return {"cls": cls, "filename": row["filename"]}
