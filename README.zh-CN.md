@@ -121,7 +121,7 @@ Immich LLM Tagger 支持自动化和手动两种打标触发模式，可按你�
    - URL：`http://<your-tagger-host>:8080/api/hooks/immich`
    - Custom Headers：
      ```http
-     x-webhook-token: <在 Tagger Web 控制台「连接配置」中生成的 Webhook Token>
+     x-webhook-token: <在 Tagger Web 控制台「连接配置 → Webhook 接入」中生成的 Webhook Token>
      ```
 6. **最终效果**：手机拍摄新照片上传到 Immich 后，Immich 会自动贴上 `未分类` 标签并秒级推送 Webhook，Tagger 异步拉取缩略图、调用视觉大模型识别、执行归档或相册归集，并**自动摘除 `未分类` 标签**，全流程无需人工介入！
 
@@ -178,7 +178,7 @@ Immich LLM Tagger 支持自动化和手动两种打标触发模式，可按你�
 
 ### `enabled_effects`
 
-每个写入目标都是一个独立的**效应器**：`tag`、`visibility`、`album`、`rating`、`description`。可在 **配置中心 → 定时轮询 → 效应器与重试** 中勾选（`enabled_effects`）；未勾选的效应器在规划阶段就被剔除 —— 既不写 Immich，也不落 `change_log`。默认五个全开。若想「静默升级」（继续打标签，但评分/描述留给你手填），把 `rating` / `description` 从列表中移除即可。
+每个写入目标都是一个独立的**效应器**：`tag`、`visibility`、`album`、`rating`、`description`。可在 **配置中心 → 识别设置 → 效应器与重试** 中勾选（`enabled_effects`）；未勾选的效应器在规划阶段就被剔除 —— 既不写 Immich，也不落 `change_log`。默认五个全开。若想「静默升级」（继续打标签，但评分/描述留给你手填），把 `rating` / `description` 从列表中移除即可。
 
 同一面板还有：
 

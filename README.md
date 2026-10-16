@@ -121,7 +121,7 @@ Configure Immich's built-in Workflow to automatically tag new uploads as `unclas
    - URL: `http://<your-tagger-host>:8080/api/hooks/immich`
    - Custom Headers:
      ```http
-     x-webhook-token: <Your Webhook Token from Tagger UI -> Settings>
+     x-webhook-token: <Your Webhook Token from Tagger UI -> Connections -> Webhook Endpoint>
      ```
 6. **Result**: Any new photo uploaded from phones will be tagged as `unclassified`, trigger the Webhook immediately, get analyzed by the Vision LLM, filed/archived accordingly, and finally have the `unclassified` queue tag stripped away cleanly!
 
@@ -178,7 +178,7 @@ An existing `rating = -1` counts as a value (it is not treated as "unrated") —
 
 ### `enabled_effects`
 
-Every write target is an independent effector: `tag`, `visibility`, `album`, `rating`, `description`. The list is editable in **Config → Polling → Effectors & Retries** (`enabled_effects`); anything not listed is planned away entirely — no Immich write and no `change_log` entry. Default is all five. To upgrade "silently" (keep tagging, but leave rating/description for you to fill in by hand), remove `rating` / `description` from the list.
+Every write target is an independent effector: `tag`, `visibility`, `album`, `rating`, `description`. The list is editable in **Config → Recognition Settings → Effectors & Retries** (`enabled_effects`); anything not listed is planned away entirely — no Immich write and no `change_log` entry. Default is all five. To upgrade "silently" (keep tagging, but leave rating/description for you to fill in by hand), remove `rating` / `description` from the list.
 
 The same panel contains:
 

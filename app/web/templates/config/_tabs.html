@@ -1,9 +1,11 @@
 <div class="space-y-4 mb-6">
-  <!-- 3 Tab 主切换条 -->
+  {# 4 Tab 主切换条：连接配置 / 处理规则 / 识别设置 / 维护与备份。
+     「识别设置」（轮询 + 效应器 + 重试）原先是「连接配置」下的子页，藏得太深，
+     提升为顶级 tab（Webhook 接入留在「连接配置」）。 #}
   <div class="border-b border-[#20232d] flex items-center justify-between gap-4">
     <div class="flex items-center gap-2 -mb-px">
       <a href="/config/immich"
-         class="px-5 py-3 text-sm border-b-2 transition flex items-center gap-2.5 {% if request and (request.url.path in ['/config/immich', '/config/llm', '/config/poll', '/config']) %}border-[#5e6ad2] text-white font-medium bg-[#13151c]/40{% else %}border-transparent text-zinc-400 hover:text-zinc-200{% endif %}">
+         class="px-5 py-3 text-sm border-b-2 transition flex items-center gap-2.5 {% if request and (request.url.path in ['/config/immich', '/config/llm', '/config/webhook', '/config']) %}border-[#5e6ad2] text-white font-medium bg-[#13151c]/40{% else %}border-transparent text-zinc-400 hover:text-zinc-200{% endif %}">
         <span>{{ tr("config.tabs.connection") }}</span>
         <span class="text-xs font-mono px-2 py-0.5 rounded bg-[#181b24] text-zinc-400">{{ tr("config.tabs.connection_count") }}</span>
       </a>
@@ -12,6 +14,12 @@
          class="px-5 py-3 text-sm border-b-2 transition flex items-center gap-2.5 {% if request and (request.url.path in ['/config/scope', '/config/tags', '/config/exclusions', '/config/markers', '/config/prompt']) %}border-[#5e6ad2] text-white font-medium bg-[#13151c]/40{% else %}border-transparent text-zinc-400 hover:text-zinc-200{% endif %}">
         <span>{{ tr("config.tabs.rules") }}</span>
         <span class="text-xs font-mono px-2 py-0.5 rounded bg-[#181b24] text-zinc-400">{{ tr("config.tabs.rules_count") }}</span>
+      </a>
+
+      <a href="/config/poll"
+         class="px-5 py-3 text-sm border-b-2 transition flex items-center gap-2.5 {% if request and request.url.path == '/config/poll' %}border-[#5e6ad2] text-white font-medium bg-[#13151c]/40{% else %}border-transparent text-zinc-400 hover:text-zinc-200{% endif %}">
+        <span>{{ tr("config.tabs.recognition") }}</span>
+        <span class="text-xs font-mono px-2 py-0.5 rounded bg-[#181b24] text-zinc-400">{{ tr("config.tabs.recognition_count") }}</span>
       </a>
 
       <a href="/config/transfer"
@@ -24,7 +32,7 @@
 
   <!-- 次级子页面胶囊导航 -->
   <div class="flex flex-wrap items-center gap-2 pt-1 text-xs">
-    {% if request and (request.url.path in ['/config/immich', '/config/llm', '/config/poll', '/config']) %}
+    {% if request and (request.url.path in ['/config/immich', '/config/llm', '/config/webhook', '/config']) %}
     <a href="/config/immich"
        class="px-3.5 py-1.5 rounded transition font-medium {% if request.url.path in ['/config/immich', '/config'] %}bg-[#5e6ad2] text-white shadow-sm{% else %}bg-[#181b24] text-zinc-300 hover:text-white hover:bg-[#202430] border border-[#20232d]{% endif %}">
       {{ tr("config.tabs.sub_immich") }}
@@ -33,9 +41,9 @@
        class="px-3.5 py-1.5 rounded transition font-medium {% if request.url.path == '/config/llm' %}bg-[#5e6ad2] text-white shadow-sm{% else %}bg-[#181b24] text-zinc-300 hover:text-white hover:bg-[#202430] border border-[#20232d]{% endif %}">
       {{ tr("config.tabs.sub_llm") }}
     </a>
-    <a href="/config/poll"
-       class="px-3.5 py-1.5 rounded transition font-medium {% if request.url.path == '/config/poll' %}bg-[#5e6ad2] text-white shadow-sm{% else %}bg-[#181b24] text-zinc-300 hover:text-white hover:bg-[#202430] border border-[#20232d]{% endif %}">
-      {{ tr("config.tabs.sub_poll") }}
+    <a href="/config/webhook"
+       class="px-3.5 py-1.5 rounded transition font-medium {% if request.url.path == '/config/webhook' %}bg-[#5e6ad2] text-white shadow-sm{% else %}bg-[#181b24] text-zinc-300 hover:text-white hover:bg-[#202430] border border-[#20232d]{% endif %}">
+      {{ tr("config.tabs.sub_webhook") }}
     </a>
     {% elif request and (request.url.path in ['/config/scope', '/config/tags', '/config/exclusions', '/config/markers', '/config/prompt']) %}
     <a href="/config/scope"
@@ -46,10 +54,6 @@
        class="px-3.5 py-1.5 rounded transition font-medium {% if request.url.path == '/config/tags' %}bg-[#5e6ad2] text-white shadow-sm{% else %}bg-[#181b24] text-zinc-300 hover:text-white hover:bg-[#202430] border border-[#20232d]{% endif %}">
       {{ tr("config.tabs.sub_tags") }}
     </a>
-    <a href="/config/exclusions"
-       class="px-3.5 py-1.5 rounded transition font-medium {% if request.url.path == '/config/exclusions' %}bg-[#5e6ad2] text-white shadow-sm{% else %}bg-[#181b24] text-zinc-300 hover:text-white hover:bg-[#202430] border border-[#20232d]{% endif %}">
-      {{ tr("config.nav.exclusions") }}
-    </a>
     <a href="/config/markers"
        class="px-3.5 py-1.5 rounded transition font-medium {% if request.url.path == '/config/markers' %}bg-[#5e6ad2] text-white shadow-sm{% else %}bg-[#181b24] text-zinc-300 hover:text-white hover:bg-[#202430] border border-[#20232d]{% endif %}">
       {{ tr("config.nav.markers") }}
@@ -57,6 +61,11 @@
     <a href="/config/prompt"
        class="px-3.5 py-1.5 rounded transition font-medium {% if request.url.path == '/config/prompt' %}bg-[#5e6ad2] text-white shadow-sm{% else %}bg-[#181b24] text-zinc-300 hover:text-white hover:bg-[#202430] border border-[#20232d]{% endif %}">
       {{ tr("config.nav.prompt") }}
+    </a>
+    {% elif request and request.url.path == '/config/poll' %}
+    <a href="/config/poll"
+       class="px-3.5 py-1.5 rounded transition font-medium bg-[#5e6ad2] text-white shadow-sm">
+      {{ tr("config.tabs.sub_recognition") }}
     </a>
     {% elif request and request.url.path == '/config/transfer' %}
     <a href="/config/transfer"

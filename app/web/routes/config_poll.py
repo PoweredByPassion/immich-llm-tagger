@@ -1,12 +1,9 @@
-"""配置页：Webhook / 轮询。
+"""配置页：识别设置（定时轮询 + 效应器 + 应用重试上限）。
+
+Webhook 接入已拆到 `config_webhook.py`（仍属「连接配置」组）；本页只管识别行为。
 
 - 开关即全局暂停入口：关闭 poll_enabled = 停止轮询触发（webhook 仍可入队）。
-- 可复制的 URL / Header name / Header value：token 渲染必须走
-  SettingsStore.webhook_token()（DB 无行时首次生成并持久化），
-  不能读 get_all()["webhook_token"]（兜底 None 会渲染成假空）。
-- token 轮换带二次确认，旧 token 立即失效。
-- §8.1 效应器开关 / 跳过标记标签名 / 应用重试上限也并入本页（不新开配置页，
-  否则要同步 base.html 导航与 tests/test_web_templates.py 的 CONFIG_LINKS）。
+- §8.1 效应器开关 / 跳过标记标签名 / 应用重试上限并入本页表单。
 """
 from __future__ import annotations
 
@@ -18,7 +15,6 @@ from app.web.i18n import lang_from_cookie, t
 
 router = APIRouter(prefix="/config")
 
-HEADER_NAME = "x-webhook-token"
 MIN_INTERVAL_SECONDS = 10
 # 与 SettingsStore.DEFAULTS["enabled_effects"] 的取值/顺序一致（无导出的常量源）。
 EFFECT_OPTIONS = ("tag", "visibility", "album", "rating", "description")
@@ -28,15 +24,8 @@ def _store(request: Request) -> SettingsStore:
     return SettingsStore(request.app.state.db)
 
 
-def _webhook_url(request: Request) -> str:
-    return str(request.base_url).rstrip("/") + "/api/hooks/immich"
-
-
 def _render(request: Request, settings: SettingsStore, **extra):
     ctx = {
-        "webhook_url": _webhook_url(request),
-        "header_name": HEADER_NAME,
-        "token": settings.webhook_token(),
         "poll_enabled": settings.get("poll_enabled"),
         "poll_interval_seconds": settings.get("poll_interval_seconds"),
         "queue_tag_name": settings.get("queue_tag_name"),
@@ -101,15 +90,3 @@ async def poll_save(request: Request):
     if attempts is not None:
         settings.set("apply_max_attempts", attempts)
     return _render(request, settings, saved=True)
-
-
-@router.post("/poll/rotate", response_class=HTMLResponse)
-def poll_rotate(request: Request):
-    settings = _store(request)
-    settings.rotate_webhook_token()
-    return _render(
-        request,
-        settings,
-        rotated=True,
-        rotate_message=t("config.poll.rotated", lang_from_cookie(request.cookies)),
-    )

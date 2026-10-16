@@ -159,8 +159,8 @@ _CJK = re.compile("[\u3000-\u303f\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\
 # 直接命中会被误判成 zh（见 test_web_jobs / test_web_overview 同款注释）。
 _PAGE_ROUTES = [
     "/", "/jobs/", "/usage", "/assets/", "/assets/does-not-exist",
-    "/config/immich", "/config/llm", "/config/poll", "/config/scope",
-    "/config/tags", "/config/exclusions", "/config/markers",
+    "/config/immich", "/config/llm", "/config/webhook", "/config/poll",
+    "/config/scope", "/config/tags", "/config/markers",
     "/config/prompt", "/config/transfer", "/danger",
 ]
 
@@ -200,7 +200,7 @@ def test_english_render_has_no_broken_artifacts(client):
     assert "page page." not in sandbox
     assert "Assets page." in sandbox
 
-    for url in ("/config/prompt", "/config/transfer", "/config/exclusions"):
+    for url in ("/config/prompt", "/config/transfer", "/config/scope"):
         html = c.get(url, cookies={"lang": "en"}).text
         assert " ；" not in html
         assert "、" not in html
