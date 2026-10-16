@@ -81,6 +81,54 @@ class TestNormalize:
             markers=("sensitive",),  # 内置规则：拒答 → sensitive marker（§5.4）
         )
 
+    def test_refusal_appends_on_refusal_markers(self):
+        """on_refusal 规则在拒答时打标；置信度规则不参与（confidence 为 None）。"""
+        c = normalize(
+            None,
+            refusal_text="抱歉，我无法响应这张图片。",
+            enabled_primary_tags={"screenshot"},
+            fallback_tag="other",
+            marker_rules=[("低置信", {"confidence_lt": 0.8}),
+                          ("识别失败", {"on_refusal": True})],
+        )
+        assert c.sensitive is True
+        assert c.markers == ("sensitive", "识别失败")
+
+    def test_unparseable_output_also_gets_on_refusal_markers(self):
+        """不合契约的散文输出：与 pipeline 的 status="refused" 对齐，同样打上拒答 marker。"""
+        c = normalize(
+            None,
+            refusal_text="The image shows a cat.",
+            enabled_primary_tags={"screenshot"},
+            fallback_tag="other",
+            marker_rules=[("识别失败", {"on_refusal": True})],
+        )
+        assert c.tag == "other" and c.confidence is None
+        assert c.sensitive is False
+        assert c.markers == ("识别失败",)
+
+    def test_on_refusal_rule_silent_on_success(self):
+        c = normalize(
+            {"tag": "screenshot", "confidence": 0.9, "sensitive": False},
+            refusal_text=None,
+            enabled_primary_tags={"screenshot"},
+            fallback_tag="other",
+            marker_rules=[("识别失败", {"on_refusal": True})],
+        )
+        assert c.markers == ()
+
+    def test_on_refusal_marker_named_sensitive_not_duplicated(self):
+        """拒答标记与内置 sensitive marker 同名时只留一个。"""
+        c = normalize(
+            None,
+            refusal_text="抱歉，我无法响应这张图片。",
+            enabled_primary_tags={"screenshot"},
+            fallback_tag="other",
+            marker_rules=[("sensitive", {"on_refusal": True}),
+                          ("sensitive", {"on_refusal": True})],
+        )
+        assert c.markers == ("sensitive",)
+
     def test_normal_parse(self):
         c = normalize(
             {"tag": "screenshot", "confidence": 0.9, "sensitive": False, "reason": "ui"},

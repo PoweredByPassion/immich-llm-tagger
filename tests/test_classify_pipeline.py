@@ -379,6 +379,33 @@ def test_refusal_no_retry(db: Database) -> None:
     assert json.loads(r["markers"]) == ["sensitive"]
 
 
+def test_refusal_applies_configured_marker_tag(db: Database) -> None:
+    """拒答：配置中心挂的 on_refusal marker 标签要真打进 Immich，并记进记录/状态。"""
+    client = FakeClient()
+    llm = FakeLLM(["抱歉，我无法响应这类内容。"])
+    cfg = make_cfg(marker_rules=[("识别失败", {"on_refusal": True})])
+    result = classify_asset(db, client, llm, "asset-1", cfg, source="poll")
+    assert result.status == "refused"
+    assert result.markers == ("sensitive", "识别失败")
+    assert "识别失败" in client.tagged_names
+    assert json.loads(_records(db)[0]["markers"]) == ["sensitive", "识别失败"]
+    with db.connect() as conn:
+        state = conn.execute(
+            "SELECT current_markers FROM asset_state WHERE asset_id = 'asset-1'"
+        ).fetchone()
+    assert json.loads(state["current_markers"]) == ["sensitive", "识别失败"]
+
+
+def test_unparseable_output_applies_configured_marker_tag(db: Database) -> None:
+    """不合契约的输出（status=refused）同样打上拒答 marker，与 UI 的 refused 对齐。"""
+    client = FakeClient()
+    llm = FakeLLM(["The image shows a cat."])
+    cfg = make_cfg(marker_rules=[("识别失败", {"on_refusal": True})])
+    result = classify_asset(db, client, llm, "asset-1", cfg, source="poll")
+    assert result.status == "refused"
+    assert "识别失败" in client.tagged_names
+
+
 # ------------------------------------------------------- 失败模式 6
 
 

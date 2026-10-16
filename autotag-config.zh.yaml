@@ -91,6 +91,14 @@ tags:
     min_confidence: null
     enabled: true
 
+  - name: "识别失败"
+    description: "大模型拒答或输出无法解析，未能给出分类结果，需要人工复核。"
+    kind: "marker"
+    archive: false
+    album: null
+    min_confidence: null
+    enabled: true
+
 marker_rules:
   - tag_name: "低置信度"
     condition:
@@ -99,6 +107,10 @@ marker_rules:
   - tag_name: "待复核"
     condition:
       confidence_lt: 0.5
+    enabled: true
+  - tag_name: "识别失败"
+    condition:
+      on_refusal: true
     enabled: true
 
 scope_rules: []

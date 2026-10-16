@@ -875,6 +875,18 @@ def test_build_pipeline_config_empty_tags_allowed(db: Database) -> None:
     assert cfg.default_min_confidence == 0.8  # settings 默认
 
 
+def test_build_pipeline_config_carries_on_refusal_marker_rule(db: Database) -> None:
+    """on_refusal 规则（拒答时打 failed 标签）必须原样进 cfg.marker_rules，
+    否则 parse 层拿不到它，拒答的图就不会被打标。"""
+    from app.store.crud import insert_marker_rule, insert_tag
+
+    tag_id = insert_tag(db, name="识别失败", kind="marker", description="")
+    insert_marker_rule(db, marker_tag_id=tag_id, condition={"on_refusal": True})
+
+    cfg = build_pipeline_config(db)
+    assert ("识别失败", {"on_refusal": True}) in cfg.marker_rules
+
+
 # ------------------------------------------------- dispatch（真机回归：Task 8 抓到的坑）
 
 

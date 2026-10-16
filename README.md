@@ -159,6 +159,7 @@ If you prefer manual control or want to organize your existing historical photos
 | **`sensitive`** | Marker | Marker Only | — | *Automatic* | Triggered automatically on IDs, bank details, passwords, or model safety refusals. |
 | **`low_confidence`**| Marker| Marker Only | — | *`< 0.80`* | Added when predicted archive confidence is below threshold; prevents auto-archive. |
 | **`needs_review`** | Marker | Marker Only | — | *`< 0.50`* | Added when confidence is very low, recommending manual review. |
+| **`refused`** | Marker | Marker Only | — | *Automatic* | Added when the model refuses to answer (or returns unparseable output) so no classification was produced — filter on it to review the failures manually. |
 
 ---
 

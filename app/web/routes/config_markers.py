@@ -1,7 +1,11 @@
-"""配置页：Marker 阈值规则（marker_rules）CRUD。
+"""配置页：Marker 规则（marker_rules）CRUD。
 
-condition 本里程碑固定 {"confidence_lt": float}：分类置信度低于阈值时打上该
-marker 标签。表单一个数值输入（0–1），越界中文报错；下拉只列 kind=marker 标签。
+condition 支持两种：
+  · {"confidence_lt": float} —— 分类置信度低于阈值时打上该 marker 标签（表单一个
+    0–1 数值输入，越界中文报错）；
+  · {"on_refusal": true}     —— 模型拒答（或输出无法解析）时打上该 marker 标签，
+    用于把"识别失败"的图单独标记出来供人工复核。
+下拉只列 kind=marker 标签。
 """
 from __future__ import annotations
 
@@ -23,6 +27,10 @@ from app.web.routes.config_conn import _templates
 
 router = APIRouter(prefix="/config")
 
+# condition 类型（表单 condition_type 的取值，也是模板渲染分支的键）
+CONDITION_CONFIDENCE = "confidence_lt"
+CONDITION_ON_REFUSAL = "on_refusal"
+
 
 def _db(request: Request):
     return request.app.state.db
@@ -30,6 +38,20 @@ def _db(request: Request):
 
 def _marker_tags(db):
     return [t for t in load_tags(db) if t.kind == "marker"]
+
+
+def _condition_kind(condition: dict) -> str:
+    """把 condition 归到两种类型之一供模板渲染。写入时只会写一种，故 on_refusal 优先。"""
+    return (CONDITION_ON_REFUSAL if condition.get("on_refusal")
+            else CONDITION_CONFIDENCE)
+
+
+def _parse_condition(raw: str) -> dict:
+    try:
+        cond = json.loads(raw)
+    except (ValueError, TypeError):
+        return {}
+    return cond if isinstance(cond, dict) else {}
 
 
 def _rules(db):
@@ -41,12 +63,13 @@ def _rules(db):
         ).fetchall()
     rules = []
     for row in rows:
-        condition = row["condition"]
+        condition = _parse_condition(row["condition"])
         try:
-            conf = json.loads(condition).get("confidence_lt")
-        except (ValueError, TypeError):
+            conf = float(condition["confidence_lt"])
+        except (KeyError, TypeError, ValueError):
             conf = None
-        rules.append({"row": row, "confidence_lt": conf})
+        rules.append({"row": row, "confidence_lt": conf,
+                      "kind": _condition_kind(condition)})
     return rules
 
 
@@ -73,26 +96,35 @@ def _page(request: Request, *, error: str | None = None, saved: bool = False):
 def _create_or_update(request: Request, *, rule_id: int | None, form):
     lang = lang_from_cookie(request.cookies)
     raw_tag = str(form.get("marker_tag_id", "")).strip()
-    raw_conf = str(form.get("confidence_lt", "")).strip()
+    # 旧表单（不带 condition_type）默认置信度阈值：保持既有行为兼容。
+    kind = str(form.get("condition_type", "")).strip() or CONDITION_CONFIDENCE
     try:
         marker_tag_id = int(raw_tag)
     except ValueError:
         return _page(request, error=t("config.markers.select_tag", lang))
-    conf = _parse_confidence(raw_conf)
-    if conf is None:
-        return _page(request, error=t("config.markers.conf_not_number", lang))
-    if not (0 <= conf <= 1):
-        return _page(request, error=t("config.markers.conf_out_of_range", lang))
+
+    if kind == CONDITION_ON_REFUSAL:
+        condition: dict = {CONDITION_ON_REFUSAL: True}
+    elif kind == CONDITION_CONFIDENCE:
+        conf = _parse_confidence(str(form.get("confidence_lt", "")).strip())
+        if conf is None:
+            return _page(request, error=t("config.markers.conf_not_number", lang))
+        if not (0 <= conf <= 1):
+            return _page(request, error=t("config.markers.conf_out_of_range", lang))
+        condition = {CONDITION_CONFIDENCE: conf}
+    else:
+        return _page(request, error=t("config.markers.cond_unknown", lang))
+
     try:
         if rule_id is None:
             insert_marker_rule(
                 _db(request), marker_tag_id=marker_tag_id,
-                condition={"confidence_lt": conf},
+                condition=condition,
             )
         else:
             update_marker_rule(
                 _db(request), rule_id, marker_tag_id=marker_tag_id,
-                condition={"confidence_lt": conf},
+                condition=condition,
             )
     except ValidationError as exc:
         return _page(request, error=render_problems(exc.problems, lang))

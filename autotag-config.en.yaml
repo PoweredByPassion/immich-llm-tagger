@@ -91,6 +91,14 @@ tags:
     min_confidence: null
     enabled: true
 
+  - name: "refused"
+    description: "The model refused or returned unparseable output, so no classification was produced; manual review needed."
+    kind: "marker"
+    archive: false
+    album: null
+    min_confidence: null
+    enabled: true
+
 marker_rules:
   - tag_name: "low_confidence"
     condition:
@@ -99,6 +107,10 @@ marker_rules:
   - tag_name: "needs_review"
     condition:
       confidence_lt: 0.5
+    enabled: true
+  - tag_name: "refused"
+    condition:
+      on_refusal: true
     enabled: true
 
 scope_rules: []
