@@ -162,3 +162,78 @@ def test_unauthorized_webhook_first_visit_hint(client):
     page = c.get("/config/poll").text
     assert token in page
     assert "x-webhook-token" in page.lower()
+
+
+# ------------------------------------------------------------ §8.1 效应器控件
+
+def test_page_renders_effector_controls(client):
+    """poll 页并入 §8.1 三控件（不新开配置页）；默认全开 5 个 checkbox 都勾选。"""
+    import re
+    c, settings = client
+    html = c.get("/config/poll").text
+    for eff in ("tag", "visibility", "album", "rating", "description"):
+        assert re.search(
+            r'name="enabled_effects" value="%s"[^>]*checked' % eff, html, re.S
+        ), eff
+    assert 'name="skip_marker_tag_name"' in html
+    assert 'name="apply_max_attempts"' in html
+    # 未显式配置时跳过标记标签名渲染为空串（None 不能渲染成字面 "None"）
+    assert 'value="None"' not in html
+
+
+def test_save_effector_settings(client):
+    c, settings = client
+    resp = c.post("/config/poll", data={
+        "poll_enabled": "1", "poll_interval_seconds": "60",
+        "queue_tag_name": "未分类",
+        "enabled_effects": ["tag", "rating"],
+        "skip_marker_tag_name": "我改过的名字",
+        "apply_max_attempts": "7",
+    })
+    assert resp.status_code == 200
+    assert settings.get("enabled_effects") == ["tag", "rating"]
+    assert settings.get("skip_marker_tag_name") == "我改过的名字"
+    assert settings.get("apply_max_attempts") == 7
+
+
+def test_save_effectors_all_unchecked_clears(client):
+    """复选组全部取消勾选 → 浏览器不发送该键 → 必须清空（不能"缺键即保持"）。"""
+    c, settings = client
+    resp = c.post("/config/poll", data={
+        "poll_interval_seconds": "60", "queue_tag_name": "未分类"})
+    assert resp.status_code == 200
+    assert settings.get("enabled_effects") == []
+
+
+def test_save_blank_skip_marker_resets_to_language_default(client):
+    """留空 = 未显式配置（None）→ resolve_skip_marker_tag_name 跟随语言。"""
+    c, settings = client
+    settings.set("skip_marker_tag_name", "旧名字")
+    resp = c.post("/config/poll", data={
+        "poll_interval_seconds": "60", "queue_tag_name": "未分类",
+        "skip_marker_tag_name": "   ", "apply_max_attempts": "3"})
+    assert resp.status_code == 200
+    assert settings.get("skip_marker_tag_name") is None
+
+
+def test_save_invalid_max_attempts_rejected_without_partial_write(client):
+    c, settings = client
+    before = (settings.get("apply_max_attempts"), settings.get("queue_tag_name"))
+    resp = c.post("/config/poll", data={
+        "poll_interval_seconds": "60", "queue_tag_name": "改过的队列名",
+        "apply_max_attempts": "0"})
+    assert resp.status_code == 200
+    assert "不小于 1 的整数" in resp.text
+    # 校验失败不留半套写入
+    assert (settings.get("apply_max_attempts"), settings.get("queue_tag_name")) == before
+
+
+def test_save_non_integer_max_attempts_rejected(client):
+    c, settings = client
+    before = settings.get("apply_max_attempts")
+    resp = c.post("/config/poll", data={
+        "poll_interval_seconds": "60", "queue_tag_name": "未分类",
+        "apply_max_attempts": "abc"})
+    assert resp.status_code == 200
+    assert "不小于 1 的整数" in resp.text
+    assert settings.get("apply_max_attempts") == before

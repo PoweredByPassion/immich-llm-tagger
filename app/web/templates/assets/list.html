@@ -106,6 +106,10 @@
             {% if r.visibility and r.visibility != 'timeline' %}
             <span class="px-2 py-0.5 rounded bg-[#181b24] text-zinc-400 text-xs border border-[#20232d]">{{ r.visibility }}</span>
             {% endif %}
+
+            {% if r.rating is not none %}
+            <span class="px-2 py-0.5 rounded bg-[#181b24] text-amber-300 text-xs border border-[#20232d] font-mono" title="{{ tr('assets.detail.th.rating') }}">&#9733;{{ r.rating }}</span>
+            {% endif %}
           </div>
         </div>
       </div>

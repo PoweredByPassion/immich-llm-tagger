@@ -28,6 +28,7 @@ from app.store.assets import (
     records_for_asset,
 )
 from app.store.connections import ConnectionStore
+from app.store.settings import SettingsStore
 from app.store.tags import load_tags
 from app.web.i18n import lang_from_cookie, t
 
@@ -133,6 +134,8 @@ def asset_detail(request: Request, asset_id: str):
             "primary_tags": primary_tags,
             "marker_tags": marker_tags,
             "state_job_exists": state_job_exists,
+            # _state_block.html 的重试胶囊需要「尝试次数/上限」两个数
+            "apply_max_attempts": SettingsStore(db).get("apply_max_attempts"),
         },
     )
 
@@ -159,13 +162,15 @@ def asset_thumb(request: Request, asset_id: str):
 
 
 def _review_result(request: Request, asset_id: str) -> HTMLResponse:
-    state = get_state(_db(request), asset_id)
+    db = _db(request)
+    state = get_state(db, asset_id)
     if state is not None:
         state["current_markers_list"] = json.loads(state["current_markers"] or "[]")
     return _templates(request).TemplateResponse(
         request,
         "assets/_review_result.html",
-        {"ok": True, "asset_id": asset_id, "state": state},
+        {"ok": True, "asset_id": asset_id, "state": state,
+         "apply_max_attempts": SettingsStore(db).get("apply_max_attempts")},
     )
 
 
@@ -221,7 +226,8 @@ async def asset_override(request: Request, asset_id: str):
     return _templates(request).TemplateResponse(
         request,
         "assets/_override_result.html",
-        {"ok": True, "asset_id": asset_id, "state": state},
+        {"ok": True, "asset_id": asset_id, "state": state,
+         "apply_max_attempts": SettingsStore(db).get("apply_max_attempts")},
     )
 
 
@@ -304,5 +310,6 @@ def asset_sync(request: Request, asset_id: str):
             "message": t("assets.sync.done", lang),
             "state": get_state(db, asset_id),
             "asset_id": asset_id,
+            "apply_max_attempts": SettingsStore(db).get("apply_max_attempts"),
         },
     )

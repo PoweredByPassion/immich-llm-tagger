@@ -463,3 +463,44 @@ def test_has_system_archive_false_for_timeline_apply_row(db: Database) -> None:
 
 def test_has_system_archive_false_when_absent(db: Database) -> None:
     assert store_assets.has_system_archive(db, "a1") is False
+
+
+# ---------- include_unapplied（apply 失败挂起重试）----------
+
+def test_include_unapplied_widens_error_filter(tmp_path: Path):
+    """apply 失败挂起重试的记录 status 仍是 'ok'，失败由 applied_at IS NULL 表达。"""
+    from app.db.connection import Database
+    from app.db.migrate import migrate
+    from app.store.assets import query_records
+
+    d = Database(tmp_path / "t.db"); migrate(d)
+    with d.connect() as conn:
+        conn.execute(
+            "INSERT INTO asset_records (asset_id, job_id, source, status, dry_run, "
+            "  applied_at) VALUES "
+            "('a1',5,'poll','ok',0,NULL),"       # apply 失败，待重试
+            "('a2',5,'poll','error',0,NULL),"    # 分析失败
+            "('a3',5,'poll','ok',0,'2026-01-01 00:00:01')")   # 正常
+
+    # 不开启时只看真正的 error
+    assert [r["asset_id"] for r in query_records(d, job_id=5, status="error")] == ["a2"]
+    # 开启后两者都要出现
+    got = query_records(d, job_id=5, status="error", include_unapplied=True)
+    assert sorted(r["asset_id"] for r in got) == ["a1", "a2"]
+
+
+def test_include_unapplied_skips_dry_run_records(tmp_path: Path):
+    """沙盒记录从不写 applied_at → 「ok + applied_at IS NULL」会误命中；
+    必须限定 dry_run=0，否则 dryrun 任务把成功记录全列成失败清单。"""
+    from app.db.connection import Database
+    from app.db.migrate import migrate
+    from app.store.assets import query_records
+
+    d = Database(tmp_path / "t.db"); migrate(d)
+    with d.connect() as conn:
+        conn.execute(
+            "INSERT INTO asset_records (asset_id, job_id, source, status, dry_run, "
+            "  applied_at) VALUES "
+            "('s1',7,'manual','ok',1,NULL)")       # 沙盒成功（applied_at 恒为 NULL）
+    got = query_records(d, job_id=7, status="error", include_unapplied=True)
+    assert got == []

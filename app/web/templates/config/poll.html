@@ -127,6 +127,39 @@
         <p class="mt-1.5 text-xs text-[#626773]">{{ tr("config.poll.queue_tag_hint") }}</p>
       </div>
 
+      <!-- §8.1 效应器开关 / 跳过标记标签名 / 应用重试上限（并入本页表单，不新开页） -->
+      <div class="pt-4 mt-1 border-t border-[#20232d] space-y-4">
+        <div>
+          <h3 class="text-xs font-semibold text-[#f1f3f9]">{{ tr("config.effects.title") }}</h3>
+          <p class="text-xs text-[#8a8f98] mt-0.5">{{ tr("config.effects.enabled") }}</p>
+        </div>
+
+        <div class="flex flex-wrap gap-x-5 gap-y-2">
+          {% for eff in effect_options %}
+          <label class="flex items-center gap-2 text-xs font-mono text-zinc-200 cursor-pointer select-none">
+            <input type="checkbox" name="enabled_effects" value="{{ eff }}"
+                   {% if eff in enabled_effects %}checked{% endif %}
+                   class="h-4 w-4 rounded-[4px] border-[#20232d] bg-[#090a0f] text-[#5e6ad2] focus:ring-0 focus:ring-offset-0">
+            <span>{{ eff }}</span>
+          </label>
+          {% endfor %}
+        </div>
+
+        <div>
+          <label for="skip_marker_tag_name" class="mb-1.5 block text-xs font-medium text-[#8a8f98]">{{ tr("config.effects.skip_marker") }}</label>
+          <input type="text" id="skip_marker_tag_name" name="skip_marker_tag_name"
+                 value="{{ skip_marker_tag_name or '' }}"
+                 class="input w-64">
+        </div>
+
+        <div>
+          <label for="apply_max_attempts" class="mb-1.5 block text-xs font-medium text-[#8a8f98]">{{ tr("config.effects.max_attempts") }}</label>
+          <input type="number" id="apply_max_attempts" name="apply_max_attempts"
+                 value="{{ apply_max_attempts }}" min="1"
+                 class="input w-44 num">
+        </div>
+      </div>
+
       <div class="pt-2">
         <button type="submit" class="btn btn-primary text-xs h-9 px-4">
           {{ tr("config.common.save") }}

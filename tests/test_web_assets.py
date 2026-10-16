@@ -240,6 +240,59 @@ def test_detail_404_when_no_records(client):
     assert resp.status_code == 404
 
 
+# ------------------------------------------- Task 16: apply 重试胶囊 / 评分描述
+
+def _set_apply_attempts(db, asset_id: str, n: int) -> None:
+    with db.connect() as conn:
+        conn.execute(
+            "UPDATE asset_state SET apply_attempts = ? WHERE asset_id = ?",
+            (n, asset_id),
+        )
+
+
+def test_detail_retry_pending_pill_shows_attempts_and_cap(client):
+    """apply 失败待重试：黄色胶囊「待重试 (1/3)」，上限取自 SettingsStore
+    （只有 apply_attempts 一个数则第二个 %s 填不出来）。"""
+    c, db = client
+    _insert_record(db, ASSET_ID)
+    _insert_state(db, ASSET_ID)
+    _set_apply_attempts(db, ASSET_ID, 1)
+    html = c.get(f"/assets/{ASSET_ID}").text
+    assert "待重试 (1/3)" in html
+
+
+def test_detail_gave_up_pill_when_attempts_reach_cap(client):
+    """attempts ≥ apply_max_attempts（默认 3）→ 红色「已放弃应用」。"""
+    c, db = client
+    _insert_record(db, ASSET_ID)
+    _insert_state(db, ASSET_ID)
+    _set_apply_attempts(db, ASSET_ID, 3)
+    html = c.get(f"/assets/{ASSET_ID}").text
+    assert "已放弃应用" in html
+    assert "待重试" not in html
+
+
+def test_detail_no_retry_pill_when_zero_attempts(client):
+    c, db = client
+    _insert_record(db, ASSET_ID)
+    _insert_state(db, ASSET_ID)
+    html = c.get(f"/assets/{ASSET_ID}").text
+    assert "待重试" not in html
+    assert "已放弃应用" not in html
+
+
+def test_detail_shows_rating_and_description(client):
+    """详情历史表展示本次分析产出的 rating / description。"""
+    c, db = client
+    _insert_record(db, ASSET_ID, rating=4, description="一只在窗边的猫")
+    _insert_state(db, ASSET_ID)
+    html = c.get(f"/assets/{ASSET_ID}").text
+    assert "一只在窗边的猫" in html
+    assert "评分" in html
+    assert "描述" in html
+    assert ">4<" in html  # rating 单元格
+
+
 # ------------------------------------------------------------------- 同步
 
 class _FakeClient:

@@ -205,6 +205,12 @@ _DICTIONARY: dict[str, dict[str, str]] = {
     "config.poll.trigger_title":  {"zh": "触发时机说明", "en": "Trigger Timing"},
     "config.poll.trigger_desc_before": {"zh": "在 Immich Workflow 里配置 Trigger Webhook step，触发时机推荐选择", "en": "In Immich Workflow, add a Trigger Webhook step; the recommended trigger is"},
     "config.poll.trigger_desc_after":  {"zh": "：新图被打上「未分类」标签后立即触发分类。webhook 不可用时由轮询兜底。", "en": ": classify immediately after a new image is tagged \"Unclassified\". Polling is the fallback when webhooks are unavailable."},
+    # --- 配置中心：效应器开关与重试（§8.1，并入 poll 页，不新开页）---
+    "config.effects.title":        {"zh": "效应器与重试", "en": "Effectors & Retries"},
+    "config.effects.enabled":      {"zh": "启用的效应器（未勾选的写入被跳过）", "en": "Enabled effectors (unchecked writes are skipped)"},
+    "config.effects.skip_marker":  {"zh": "跳过标记标签名（留空则跟随语言）", "en": "Skip-marker tag name (empty follows language)"},
+    "config.effects.max_attempts": {"zh": "应用最大重试次数", "en": "Max apply attempts"},
+    "config.effects.max_attempts_invalid": {"zh": "应用最大重试次数必须是不小于 1 的整数", "en": "Max apply attempts must be an integer of at least 1"},
     # --- 配置中心：导入导出 ---
     "config.transfer.title":      {"zh": "导入导出", "en": "Import / Export"},
     "config.transfer.heading":    {"zh": "配置维护与迁移", "en": "Config Maintenance & Migration"},
@@ -413,6 +419,8 @@ _DICTIONARY: dict[str, dict[str, str]] = {
     "assets.detail.th.job":          {"zh": "任务", "en": "Job"},
     "assets.detail.th.model":        {"zh": "模型", "en": "Model"},
     "assets.detail.th.tokens":       {"zh": "Token 用量", "en": "Token Usage"},
+    "assets.detail.th.rating":       {"zh": "评分", "en": "Rating"},
+    "assets.detail.th.description":  {"zh": "描述", "en": "Description"},
     "assets.detail.none":            {"zh": "无", "en": "None"},
     "assets.detail.default":         {"zh": "默认", "en": "default"},
     "assets.detail.empty":           {"zh": "暂无分类记录", "en": "No classification records"},
@@ -435,6 +443,9 @@ _DICTIONARY: dict[str, dict[str, str]] = {
     "assets.review.marked":   {"zh": "已标记为已复核", "en": "Marked as reviewed"},
     "assets.review.unmarked": {"zh": "已取消复核", "en": "Review cleared"},
     "assets.sync.done": {"zh": "已同步", "en": "Synced"},
+    # --- 图片记录：apply 重试状态（失败由 applied_at IS NULL 表达，见 §7.3）---
+    "assets.retry_pending": {"zh": "待重试 (%s/%s)", "en": "Retrying (%s/%s)"},
+    "assets.apply_gave_up": {"zh": "已放弃应用", "en": "Apply gave up"},
     # --- 图片记录：未找到 ---
     "assets.notfound.body": {"zh": "未找到资产 %s", "en": "Asset %s not found"},
     "assets.notfound.desc": {"zh": "该资产没有任何分类记录。", "en": "This asset has no classification records."},

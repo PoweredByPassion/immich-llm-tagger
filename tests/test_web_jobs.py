@@ -252,6 +252,40 @@ def test_detail_failure_list_from_records(client):
     assert "/assets/asset-err-1" in html
 
 
+def test_detail_failure_list_includes_unapplied_ok_records(client):
+    """apply 失败挂起重试的记录 status 仍是 'ok' 且 applied_at 为 NULL；
+    失败清单必须走 include_unapplied=True 才能列出这些待重试项。"""
+    c = client
+    db = c.app.state.db
+    jid = _running_job(db)
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO asset_records (asset_id, job_id, source, predicted_tag, "
+            "confidence, status, applied_at) VALUES "
+            "('asset-retry-1', ?, 'poll', 'landscape', 0.9, 'ok', NULL)",
+            (jid,),
+        )
+    html = c.get(f"/jobs/{jid}").text
+    assert "asset-retry-1" in html
+
+
+def test_detail_failure_list_excludes_dry_run_records(client):
+    """沙盒记录 applied_at 恒为 NULL 且 status='ok'；失败清单必须限定
+    dry_run=0，否则 dryrun 任务的成功记录会被全列成失败清单。"""
+    c = client
+    db = c.app.state.db
+    jid = jobs_store.create_job(db, "dryrun", params={})
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO asset_records (asset_id, job_id, source, predicted_tag, "
+            "confidence, status, dry_run, applied_at) "
+            "VALUES ('sandbox-leak', ?, 'manual', 'landscape', 0.9, 'ok', 1, NULL)",
+            (jid,),
+        )
+    html = c.get(f"/jobs/{jid}").text
+    assert "sandbox-leak" not in html
+
+
 def test_detail_params_snapshot(client):
     c = client
     db = c.app.state.db

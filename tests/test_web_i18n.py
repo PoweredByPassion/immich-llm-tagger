@@ -219,3 +219,23 @@ def test_dictionary_has_no_bare_percent():
     for key, entry in i18n._DICTIONARY.items():
         for lang in ("zh", "en"):
             assert "%" not in entry[lang].replace("%s", ""), (key, lang)
+
+
+def test_retry_pending_has_two_placeholders():
+    """assets.retry_pending 是「待重试 (尝试次数/上限)」，需要两个 %s；
+    zh/en 都必须有两个（模板用 % (attempts, cap) 渲染，少一个会 TypeError）。"""
+    from app.web import i18n
+    entry = i18n._DICTIONARY["assets.retry_pending"]
+    assert entry["zh"].count("%s") == 2
+    assert entry["en"].count("%s") == 2
+
+
+def test_task16_new_keys_present():
+    """Task 16 新增的 6 条词条（apply 重试 + effector 配置）都在字典里。"""
+    from app.web import i18n
+    for key in (
+        "assets.retry_pending", "assets.apply_gave_up",
+        "config.effects.title", "config.effects.enabled",
+        "config.effects.skip_marker", "config.effects.max_attempts",
+    ):
+        assert key in i18n._DICTIONARY, key

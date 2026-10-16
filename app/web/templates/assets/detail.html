@@ -156,6 +156,8 @@
               <th class="py-3 px-4 font-medium">{{ tr("assets.detail.th.tokens") }}</th>
               <th class="py-3 px-4 font-medium">{{ tr("jobs.th.duration") }}</th>
               <th class="py-3 px-4 font-medium">{{ tr("common.status") }}</th>
+              <th class="py-3 px-4 font-medium">{{ tr("assets.detail.th.rating") }}</th>
+              <th class="py-3 px-4 font-medium">{{ tr("assets.detail.th.description") }}</th>
               <th class="py-3 px-4 font-medium">{{ tr("jobs.th.time") }}</th>
             </tr>
           </thead>
@@ -182,6 +184,8 @@
                 <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-mono bg-rose-500/10 text-rose-400 border border-rose-500/20">error</span>
                 {% endif %}
               </td>
+              <td class="num py-3.5 px-4 font-mono tabular-nums text-zinc-300">{{ r.rating if r.rating is not none else "" }}</td>
+              <td class="py-3.5 px-4 text-zinc-300 text-xs">{{ r.description or tr("assets.detail.none") }}</td>
               <td class="num py-3.5 px-4 font-mono tabular-nums text-zinc-400 text-xs"><span data-utc="{{ r.created_at }}">{{ r.created_at }}</span></td>
             </tr>
             {% endfor %}
