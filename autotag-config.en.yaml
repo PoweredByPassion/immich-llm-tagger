@@ -106,7 +106,7 @@ exclusions: []
 
 prompt_versions:
   - body: |
-      You are classifying ONE image from a personal photo library. Reply with ONLY a JSON object, no prose, no markdown fences.
+      You are classifying ONE image from a personal photo library. First describe what you actually see, then classify, then rate. Reply with ONLY a JSON object, no prose, no markdown fences.
 
       Pick exactly one tag from the list below:
       {{TAG_LIST}}
@@ -114,9 +114,10 @@ prompt_versions:
       File: {{FILENAME}}
       Date: {{DATE}}
 
-      Output exactly this JSON shape:
-      {"tag":"<one of the primary tags>","confidence":<0.0-1.0>,"sensitive":<true|false>,"reason":"<at most 8 words>"}
+      Output exactly this JSON shape, keeping the field order:
+      {"description":"<one sentence about the image>","tag":"<one of the primary tags>","confidence":<0.0-1.0>,"sensitive":<true|false>,"reason":"<at most 8 words>","rating":<1-5>}
 
+      "description" comes first: state what you actually see in one sentence, then let the tag, confidence and rating build on it. "rating" is an integer 1-5 (1 = least important, 5 = most important or keepsake).
       "sensitive" = identity documents, bank cards, passwords, private messages, medical or financial records.
       Always output the JSON object, even for sensitive or private images - just set sensitive to true. Never refuse or apologise.
       If none fits, use the fallback tag.

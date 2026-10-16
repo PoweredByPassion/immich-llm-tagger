@@ -1477,3 +1477,12 @@ def test_scan_heal_failure_does_not_break_scan(db: Database, monkeypatch) -> Non
     assert rec.calls == ["a2"]
     row = jobs.get_job(db, job_id)
     assert row.status == "done"
+
+
+def test_default_prompt_template_declares_new_contract():
+    from app.engine.executor import DEFAULT_PROMPT_TEMPLATE
+    assert "description" in DEFAULT_PROMPT_TEMPLATE
+    assert "rating" in DEFAULT_PROMPT_TEMPLATE
+    assert "{{TAG_LIST}}" in DEFAULT_PROMPT_TEMPLATE        # 强制占位符仍在
+    # description 必须排在 tag 之前（Visual CoT，D3）
+    assert DEFAULT_PROMPT_TEMPLATE.index("description") < DEFAULT_PROMPT_TEMPLATE.index('"tag"')

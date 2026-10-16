@@ -48,8 +48,10 @@ DEFAULT_PROMPT_TEMPLATE = (
     "Tags:\n{{TAG_LIST}}\n\n"
     "File: {{FILENAME}}\n"
     "Date: {{DATE}}\n\n"
-    'Respond with JSON: {"tag": "<tag>", "confidence": <0-1>, '
-    '"sensitive": <bool>, "reason": "<short>"}\n'
+    "First describe what you actually see, then classify, then rate. "
+    'Respond with JSON: {"description": "<one sentence>", "tag": "<tag>", '
+    '"confidence": <0-1>, "sensitive": <bool>, "reason": "<short>", '
+    '"rating": <1-5>}\n'
     "If none fits, use the fallback tag. If this is not a screenshot or the "
     "content is sensitive, refuse."
 )
