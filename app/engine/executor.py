@@ -52,8 +52,13 @@ DEFAULT_PROMPT_TEMPLATE = (
     'Respond with JSON: {"description": "<one sentence>", "tag": "<tag>", '
     '"confidence": <0-1>, "sensitive": <bool>, "reason": "<short>", '
     '"rating": <1-5>}\n'
-    "If none fits, use the fallback tag. If this is not a screenshot or the "
-    "content is sensitive, refuse."
+    "If none fits, use the fallback tag. Set "
+    '"sensitive" true for anything not safe to share publicly (nudity, '
+    "intimate or medical images, ID cards, passports, bank cards, passwords, "
+    "private chats, contact details, addresses, medical or financial records, "
+    "sensitive imagery of minors, gore, evidence of illegal activity); always "
+    "output the JSON object, never refuse, and keep explicit or intimate "
+    'details out of "description".'
 )
 
 # scan 拆分后的协调器：轮询子任务直到全部终态，再收尾父 scan。不占用 worker

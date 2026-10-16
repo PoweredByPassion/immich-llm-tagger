@@ -118,8 +118,8 @@ prompt_versions:
       {"description":"<one sentence about the image>","tag":"<one of the primary tags>","confidence":<0.0-1.0>,"sensitive":<true|false>,"reason":"<at most 8 words>","rating":<1-5>}
 
       "description" comes first: state what you actually see in one sentence, then let the tag, confidence and rating build on it. "rating" is an integer 1-5 (1 = least important, 5 = most important or keepsake).
-      "sensitive" = identity documents, bank cards, passwords, private messages, medical or financial records.
-      Always output the JSON object, even for sensitive or private images - just set sensitive to true. Never refuse or apologise.
+      "sensitive" must be true whenever the image contains or implies anything not safe to share publicly: intimate body parts, nudity, partial nudity, sexual acts, sexual suggestiveness, intimate contact, underwear or swimwear exposure, changing clothes, bathing, medically exposed bodies, ID cards, passports, driving licences, bank or credit cards, passwords, one-time codes, private chats, contact details, home addresses, location data, medical records, financial bills, sensitive imagery of minors, violence or gore, evidence of illegal activity. If ANY of these applies, set "sensitive" to true.
+      Always output the JSON object, even for sensitive or private images - just set sensitive to true. Never refuse or apologise, and never spell out explicit or intimate details in "description".
       If none fits, use the fallback tag.
     note: "Default English multimodal vision prompt version"
     created_at: "2026-10-12T00:00:00"
