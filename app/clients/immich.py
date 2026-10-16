@@ -62,7 +62,7 @@ from app.clients._immich_gen.models.library_response_dto import LibraryResponseD
 from app.clients._immich_gen.models.metadata_search_dto import MetadataSearchDto
 from app.clients._immich_gen.models.tag_response_dto import TagResponseDto
 from app.clients._immich_gen.models.tag_upsert_dto import TagUpsertDto
-from app.clients._immich_gen.types import Response, Unset
+from app.clients._immich_gen.types import UNSET, Response, Unset
 
 DEFAULT_TIMEOUT = 120.0
 
@@ -279,6 +279,37 @@ class ImmichClient:
             self._run(
                 _update_assets.sync_detailed,
                 body=AssetBulkUpdateDto(ids=chunk, visibility=vis),
+            )
+
+    def set_asset_properties(
+        self, asset_ids: list[str], *,
+        visibility: str | Unset = UNSET,
+        rating: int | None | Unset = UNSET,
+        description: str | Unset = UNSET,
+    ) -> None:
+        """批量写资产属性（PUT /assets，成功返回 204 无 body）。
+
+        `UNSET`（默认）= 不动该字段；`rating=None` = 显式置为"未评分"。
+        description 只接受 str（没有 None），清空传 `""`。
+        visibility 收**字符串**并在这里转枚举：调用方（效应层）不该依赖生成的
+        DTO 类型；且 AssetBulkUpdateDto.to_dict 对它调 `.value`，传裸 str 会在
+        序列化期 AttributeError —— 报错点离现场很远，所以在这里就挡住。
+        **不要**调 _check_bulk_results：204 没有逐项结果。
+        """
+        if not asset_ids:
+            return
+        vis: AssetVisibility | Unset = UNSET
+        if not isinstance(visibility, Unset):
+            try:
+                vis = AssetVisibility(visibility)
+            except ValueError as exc:
+                raise ImmichError(f"非法的 visibility: {visibility!r}") from exc
+        for i in range(0, len(asset_ids), ASSET_UPDATE_BATCH_SIZE):
+            chunk = asset_ids[i : i + ASSET_UPDATE_BATCH_SIZE]
+            self._run(
+                _update_assets.sync_detailed,
+                body=AssetBulkUpdateDto(ids=chunk, visibility=vis,
+                                        rating=rating, description=description),
             )
 
     def ensure_album(self, name: str) -> str:
