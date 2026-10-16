@@ -89,6 +89,8 @@ class Classification:
     sensitive: bool
     reason: str | None
     markers: tuple[str, ...]
+    rating: int | None = None
+    description: str | None = None
 
 
 def normalize(
@@ -131,9 +133,23 @@ def normalize(
         if hit:
             markers.append(name)
 
+    rating: int | None = None
+    if raw:
+        r = raw.get("rating")
+        # bool 是 int 的子类，必须显式排除
+        if isinstance(r, int) and not isinstance(r, bool) and 1 <= r <= 5:
+            rating = r
+
+    description: str | None = None
+    if raw:
+        d = raw.get("description")
+        if isinstance(d, str) and d.strip():
+            description = d.strip()
+
     return Classification(
         tag=tag, confidence=confidence, sensitive=sensitive,
         reason=reason, markers=tuple(markers),
+        rating=rating, description=description,
     )
 
 
