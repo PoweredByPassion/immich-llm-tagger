@@ -334,3 +334,100 @@ def test_overview_shanghai_includes_utc_yesterday_evening(db) -> None:
             (ts,))
     shanghai_view = queries.overview(db, tz_name="Asia/Shanghai")
     assert shanghai_view["processed_today"] >= 1
+
+
+# ---------- rating / description 投影与写入 ----------
+
+def test_record_fields_include_rating_and_description(tmp_path: Path):
+    """投影常量不加新列 → 详情页/历史页读不出评分与描述。"""
+    from app.db.connection import Database
+    from app.db.migrate import migrate
+    from app.store.assets import query_records
+
+    d = Database(tmp_path / "t.db"); migrate(d)
+    with d.connect() as conn:
+        conn.execute(
+            "INSERT INTO asset_records (asset_id, source, status, dry_run, "
+            "rating, description) VALUES ('a1','poll','ok',0,4,'一只猫')")
+    rows = query_records(d, limit=10)
+    assert rows[0]["rating"] == 4
+    assert rows[0]["description"] == "一只猫"
+
+
+def test_write_changes_and_state_persists_metadata(tmp_path: Path):
+    from app.db.connection import Database
+    from app.db.migrate import migrate
+    from app.store.assets import write_changes_and_state
+
+    d = Database(tmp_path / "t.db"); migrate(d)
+    with d.connect() as conn:
+        write_changes_and_state(
+            conn, asset_id="a1", job_id=None,
+            changes=[("rating_set", "a1", '{"old": null, "new": 4}')],
+            current_tag="cat", current_markers=[], visibility="timeline",
+            rating=4, description="一只猫",
+        )
+    with d.connect() as conn:
+        row = conn.execute("SELECT * FROM asset_state WHERE asset_id='a1'").fetchone()
+    assert row["rating"] == 4 and row["description"] == "一只猫"
+
+
+def test_write_changes_and_state_metadata_optional(db: Database) -> None:
+    """新 kwargs 可选：既有调用点不传时不写 rating/description（保持原行为）。"""
+    with db.connect() as conn:
+        store_assets.write_changes_and_state(
+            conn, asset_id="a1", job_id=None, changes=[],
+            current_tag="pets", current_markers=["x"], visibility="TIMELINE",
+        )
+    state = store_assets.get_state(db, "a1")
+    assert state["current_tag"] == "pets"
+    assert state["rating"] is None
+    assert state["description"] is None
+
+
+# ---------- last_written_value / bumped_apply_attempts ----------
+
+def test_last_written_value_returns_latest_apply_new(db: Database) -> None:
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO change_log (asset_id, action, direction, payload) "
+            "VALUES ('a1', 'rating_set', 'apply', '{\"old\": null, \"new\": 4}')")
+        conn.execute(
+            "INSERT INTO change_log (asset_id, action, direction, payload) "
+            "VALUES ('a1', 'rating_set', 'apply', '{\"old\": 4, \"new\": 5}')")
+        # undo 记录不算数
+        conn.execute(
+            "INSERT INTO change_log (asset_id, action, direction, payload) "
+            "VALUES ('a1', 'rating_set', 'undo', '{\"old\": 5, \"new\": 4}')")
+    assert store_assets.last_written_value(db, "a1", "rating_set") == 5
+
+
+def test_last_written_value_none_when_absent(db: Database) -> None:
+    assert store_assets.last_written_value(db, "nope", "rating_set") is None
+
+
+def test_last_written_value_bad_payload_returns_none(db: Database) -> None:
+    """payload 解析失败按 None 处理，不向效应层抛异常。"""
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO change_log (asset_id, action, direction, payload) "
+            "VALUES ('a1', 'rating_set', 'apply', 'not-json')")
+    assert store_assets.last_written_value(db, "a1", "rating_set") is None
+
+
+def test_bumped_apply_attempts_creates_then_increments(db: Database) -> None:
+    """无 state 行则建行返回 1；再次调用自增到 2。"""
+    assert store_assets.bumped_apply_attempts(db, "a1") == 1
+    assert store_assets.bumped_apply_attempts(db, "a1") == 2
+    assert store_assets.get_state(db, "a1")["apply_attempts"] == 2
+
+
+def test_bumped_apply_attempts_keeps_existing_state(db: Database) -> None:
+    """自增不应清掉已有的 current_tag / visibility。"""
+    with db.connect() as conn:
+        _insert_state(conn, "a1", "pets", visibility="ARCHIVED")
+    assert store_assets.bumped_apply_attempts(db, "a1") == 1
+    state = store_assets.get_state(db, "a1")
+    assert state["current_tag"] == "pets"
+    assert state["visibility"] == "ARCHIVED"
+    assert state["apply_attempts"] == 1

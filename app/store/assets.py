@@ -28,6 +28,7 @@ def write_changes_and_state(
     current_tag: str,
     current_markers: list[str],
     visibility: str,
+    rating=None, description=None,
 ) -> None:
     """在调用方的事务里写 change_log 并 upsert asset_state。
 
@@ -45,17 +46,19 @@ def write_changes_and_state(
         )
     conn.execute(
         "INSERT INTO asset_state (asset_id, current_tag, current_markers, "
-        "                        visibility, last_job_id) "
-        "VALUES (:aid, :tag, :markers, :vis, :job_id) "
+        "                        visibility, rating, description, last_job_id) "
+        "VALUES (:aid, :tag, :markers, :vis, :rating, :desc, :job_id) "
         "ON CONFLICT(asset_id) DO UPDATE SET "
         "  current_tag = excluded.current_tag, "
         "  current_markers = excluded.current_markers, "
         "  visibility = excluded.visibility, "
+        "  rating = excluded.rating, "
+        "  description = excluded.description, "
         "  last_job_id = excluded.last_job_id, "
         "  updated_at = datetime('now')",
         {"aid": asset_id, "tag": current_tag,
          "markers": json.dumps(current_markers), "vis": visibility,
-         "job_id": job_id},
+         "rating": rating, "desc": description, "job_id": job_id},
     )
 
 
@@ -67,8 +70,9 @@ _RECORD_FIELDS = (
     "r.id, r.asset_id, r.job_id, r.prompt_version_id, r.source, "
     "r.predicted_tag, r.confidence, r.markers, r.model, r.usage, "
     "r.duration_ms, r.status, r.raw_response, r.dry_run, r.created_at, "
-    "r.applied_at, r.llm_request, r.filename, "
-    "s.current_tag AS current_tag, s.visibility AS visibility"
+    "r.applied_at, r.llm_request, r.filename, r.rating, r.description, "
+    "s.current_tag AS current_tag, s.visibility AS visibility, "
+    "s.apply_attempts AS apply_attempts"
 )
 
 
@@ -223,3 +227,36 @@ def count_changes_for_job(db: Database, job_id: int) -> tuple[int, int]:
             (job_id,),
         ).fetchone()
     return row["n"], row["a"]
+
+
+def last_written_value(db: Database, asset_id: str, action: str) -> object | None:
+    """本系统最近一次 apply 写入某字段的 new 值（判定"是否我们自己写的"）。
+    找不到记录返回 None。payload 解析失败按 None 处理。"""
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT payload FROM change_log "
+            " WHERE asset_id = ? AND action = ? AND direction = 'apply' "
+            " ORDER BY id DESC LIMIT 1",
+            (asset_id, action),
+        ).fetchone()
+    if row is None:
+        return None
+    try:
+        return json.loads(row["payload"]).get("new")
+    except (TypeError, ValueError):
+        return None
+
+
+def bumped_apply_attempts(db: Database, asset_id: str) -> int:
+    """apply_attempts += 1 并返回新值（无 state 行则建行）。"""
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO asset_state (asset_id, apply_attempts) VALUES (:aid, 1) "
+            "ON CONFLICT(asset_id) DO UPDATE SET "
+            "  apply_attempts = apply_attempts + 1, updated_at = datetime('now')",
+            {"aid": asset_id},
+        )
+        row = conn.execute(
+            "SELECT apply_attempts FROM asset_state WHERE asset_id = ?", (asset_id,)
+        ).fetchone()
+    return int(row["apply_attempts"])
