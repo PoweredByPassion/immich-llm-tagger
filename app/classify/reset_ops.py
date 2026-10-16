@@ -252,14 +252,23 @@ def _restore_metadata(db: Database, client, dims: frozenset[str],
         field = "rating" if action == "rating_set" else "description"
         if field not in dims:
             continue
-        exif = getattr(client.get_asset(asset_id), "exif_info", None)
-        current = _val(getattr(exif, field, None)) if exif is not None else None
-        if current != last_new[(asset_id, action)]:
-            continue                      # 用户改过 → 不动
-        if field == "rating":
-            client.set_asset_properties([asset_id], rating=old)
-        else:
-            client.set_asset_properties([asset_id], description=old or "")
+        try:
+            exif = getattr(client.get_asset(asset_id), "exif_info", None)
+            current = _val(getattr(exif, field, None)) if exif is not None else None
+            if current != last_new[(asset_id, action)]:
+                continue                      # 用户改过 → 不动
+            if field == "rating":
+                client.set_asset_properties([asset_id], rating=old)
+            else:
+                client.set_asset_properties([asset_id], description=old or "")
+        except ImmichError as exc:
+            if exc.status_code == 404:
+                # change_log 引用的资产已被用户在 Immich 删除 → 跳过这一张，
+                # 不让整个重置中途失败（镜像 unarchive 步骤的 404 处理）。
+                log_event(db, "system", "reset_restore_404", {
+                    "job_id": job_id, "asset_id": asset_id})
+                continue
+            raise
         with db.connect() as conn:
             conn.execute(
                 "INSERT INTO change_log (job_id, asset_id, action, direction, payload) "

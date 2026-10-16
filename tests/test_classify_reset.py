@@ -80,6 +80,7 @@ class FakeClient:
         self.set_props_calls: list[dict] = []
         self.removed_from_album: list[tuple[str, str]] = []  # (album_id, asset_id)
         self.get_asset_calls = 0
+        self.missing_assets: set[str] = set()               # 已被用户在 Immich 删除
 
     def list_tags(self):
         return [SimpleNamespace(name=n, id=f"id-{n}") for n in self.tag_names]
@@ -108,6 +109,8 @@ class FakeClient:
 
     def get_asset(self, asset_id):
         from types import SimpleNamespace
+        if asset_id in self.missing_assets:
+            raise ImmichError("404", status_code=404)
         self.get_asset_calls += 1
         return SimpleNamespace(exif_info=SimpleNamespace(
             rating=self.current_rating.get(asset_id),
@@ -361,6 +364,27 @@ def test_reset_rating_restores_old_but_skips_user_edited(db):
     assert steps["restored_metadata"] == 1
     (row,) = [r for r in _undo_rows(db) if r["action"] == "rating_set"]
     assert json.loads(row["payload"]) == {"old": 4, "new": None}
+
+
+def test_reset_restore_skips_deleted_asset(db):
+    """§5.10 404 容错：change_log 引用的资产已被用户在 Immich 删除 →
+    只跳过该资产，不让整个重置中途失败（镜像 unarchive 的 404 处理）。"""
+    seed_change(db, "a1", action="rating_set")
+    seed_change(db, "a2", action="rating_set")
+    with db.connect() as conn:
+        conn.execute("UPDATE change_log SET payload='{\"old\": null, \"new\": 4}' "
+                     "WHERE asset_id='a1'")
+        conn.execute("UPDATE change_log SET payload='{\"old\": null, \"new\": 4}' "
+                     "WHERE asset_id='a2'")
+    client = FakeClient(tag_names=())
+    client.current_rating = {"a2": 4}          # a2 仍在且值等于我们写入的 4
+    client.missing_assets = {"a1"}             # a1 已被用户删除 → get_asset 404
+
+    steps = ro.run_reset_steps(db, client, job_id=1, is_canceled=lambda: False,
+                               dimensions={"rating"})
+
+    assert client.set_props_calls == [{"asset_id": "a2", "rating": None}]
+    assert steps["restored_metadata"] == 1
 
 
 def test_reset_preview_counts_are_local_only(db):
