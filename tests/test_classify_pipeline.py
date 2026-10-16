@@ -1069,7 +1069,10 @@ def test_retry_reuses_stored_analysis_without_llm(db: Database) -> None:
 
 
 def test_reuse_does_not_take_refused_or_applied_records(db: Database) -> None:
-    """status='refused' / applied_at 非空 都不是可复用对象。"""
+    """status='refused' 不是可复用对象。
+
+    （applied_at 非空 / predicted_tag 为空 的守卫由下面两条专门用例钉住。）
+    """
     with db.connect() as conn:
         conn.execute(
             "INSERT INTO asset_records (asset_id, source, status, dry_run, "
@@ -1078,3 +1081,33 @@ def test_reuse_does_not_take_refused_or_applied_records(db: Database) -> None:
     llm = FakeLLM([RATING_JSON])
     classify_asset(db, FakeClient(), llm, "asset-1", make_cfg(), source="poll")
     assert len(llm.calls) == 1                              # 照常分析
+
+
+def test_reuse_skips_already_applied_record(db: Database) -> None:
+    """applied_at 非空 → 不复用（复用旧结果会盖掉更新的状态，是状态损坏类失败）。
+
+    直接调 classify_asset 会绕过 executor 的 `_already_done` 跳过，因此这里
+    确实会走到 `_reusable_analysis`，钉住它的 applied_at 守卫。
+    """
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO asset_records (asset_id, source, status, dry_run, "
+            "  predicted_tag, confidence, markers, rating, description, filename, "
+            "  applied_at) "
+            "VALUES ('asset-1','poll','ok',0,'cat',0.9,'[]',4,'一只猫','IMG_0001.png',"
+            "        datetime('now'))")
+    llm = FakeLLM([RATING_JSON])
+    classify_asset(db, FakeClient(), llm, "asset-1", make_cfg(), source="poll")
+    assert len(llm.calls) == 1                              # 已应用过 → 照常重新分析
+
+
+def test_reuse_skips_record_without_predicted_tag(db: Database) -> None:
+    """predicted_tag IS NULL → 没有可用判定，不复用。"""
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO asset_records (asset_id, source, status, dry_run, "
+            "  predicted_tag, confidence, markers) "
+            "VALUES ('asset-1','poll','ok',0,NULL,NULL,'[]')")
+    llm = FakeLLM([RATING_JSON])
+    classify_asset(db, FakeClient(), llm, "asset-1", make_cfg(), source="poll")
+    assert len(llm.calls) == 1                              # 无判定 → 照常分析
