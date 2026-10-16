@@ -23,7 +23,7 @@ def test_defaults_present_without_writing(store: SettingsStore) -> None:
 
 
 def test_defaults_table_is_complete() -> None:
-    """DEFAULTS 必须与 spec §4.1 逐键**逐值**一致。
+    """DEFAULTS 必须与 spec §4.1 + §8.1 逐键**逐值**一致。
 
     只断言 key 集合是不够的：实测把 11 个默认值里的 6 个各改一次，
     整套测试仍然全绿。默认值是契约的一部分，必须钉住具体的值。
@@ -43,6 +43,9 @@ def test_defaults_table_is_complete() -> None:
         "thumb_quality": 85,
         "record_retention_days": 90,
         "active_prompt_version_id": None,
+        "enabled_effects": ["tag", "visibility", "album", "rating", "description"],
+        "skip_marker_tag_name": None,
+        "apply_max_attempts": 3,
     }
 
 
@@ -112,3 +115,42 @@ def test_active_prompt_version_id_roundtrip(store: SettingsStore) -> None:
     assert store.get("active_prompt_version_id") == 7
     store.set_active_prompt_version(None)
     assert store.get("active_prompt_version_id") is None
+
+
+def test_new_effector_settings_have_defaults(tmp_path: Path):
+    from app.db.connection import Database
+    from app.db.migrate import migrate
+    from app.store.settings import SettingsStore
+
+    d = Database(tmp_path / "t.db"); migrate(d)
+    s = SettingsStore(d)
+    assert s.get("enabled_effects") == [
+        "tag", "visibility", "album", "rating", "description"]
+    assert s.get("apply_max_attempts") == 3
+    # 默认 None = 「未显式配置」→ 由调用方按语言解析（§8.1 的
+    # 「保留人工信息 / manual-kept」）。见下方 resolve_skip_marker_tag_name。
+    assert s.get("skip_marker_tag_name") is None
+
+
+def test_resolve_skip_marker_tag_name_follows_language(tmp_path: Path):
+    from app.db.connection import Database
+    from app.db.migrate import migrate
+    from app.store.settings import SettingsStore, resolve_skip_marker_tag_name
+
+    d = Database(tmp_path / "t.db"); migrate(d)
+    s = SettingsStore(d)
+    assert resolve_skip_marker_tag_name(s, "zh") == "保留人工信息"
+    assert resolve_skip_marker_tag_name(s, "en") == "manual-kept"
+    s.set("skip_marker_tag_name", "我改过的名字")
+    assert resolve_skip_marker_tag_name(s, "en") == "我改过的名字"   # 显式配置优先
+
+
+def test_enabled_effects_roundtrip_is_json(tmp_path: Path):
+    from app.db.connection import Database
+    from app.db.migrate import migrate
+    from app.store.settings import SettingsStore
+
+    d = Database(tmp_path / "t.db"); migrate(d)
+    s = SettingsStore(d)
+    s.set("enabled_effects", ["tag", "rating"])
+    assert s.get("enabled_effects") == ["tag", "rating"]
