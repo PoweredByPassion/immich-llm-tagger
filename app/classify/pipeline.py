@@ -241,7 +241,7 @@ def _process(db, client, llm, asset_id, cfg, *, source, dry_run, job_id,
             ).fetchone()
         effective_manual_override = bool(row["manual_override"]) if row else False
 
-    snapshot = _snapshot(client, asset_id, asset_hint)
+    snapshot = _snapshot(client, asset_id)
     gates = Gates(
         dry_run=False,                       # 已在上面的 if dry_run 里返回
         manual_override=effective_manual_override,
@@ -298,18 +298,14 @@ def _process(db, client, llm, asset_id, cfg, *, source, dry_run, job_id,
                           markers=markers, status=status, dry_run=False)
 
 
-def _snapshot(client, asset_id: str, asset_hint: dict | None) -> AssetSnapshot:
+def _snapshot(client, asset_id: str) -> AssetSnapshot:
     """取当前值快照（§5.3）。
 
-    hint **不带 visibility**（`hooks.py:40` 的 `_HINT_FIELDS`），而 visibility
-    默认启用 → 默认配置下每个 webhook 都会回退一次 get_asset()。这是刻意的：
-    hint 里的 exifInfo 是否真带 rating/description 未经实测（§12），所以只有当
-    hint 覆盖了全部所需字段时才敢信它。代价是每图多一次轻量 GET。
+    webhook hint 的 exifInfo 字段（rating/description）与 visibility 都**没有**
+    对真实 Immich 实测过（§12），hint 里的这些值不能当事实 —— 所以快照**始终**
+    从 `get_asset()` 取。`AssetSnapshot.from_hint` 适配器保留，等这些字段被实测
+    验证、确认真带所需值时再启用。代价是每图多一次轻量 GET。
     """
-    if asset_hint is not None:
-        snap = AssetSnapshot.from_hint(asset_hint)
-        if snap.visibility is not None:
-            return snap
     return AssetSnapshot.from_dto(client.get_asset(asset_id))
 
 
@@ -344,9 +340,18 @@ def _update_state(conn, *, asset_id, job_id, tag, markers, snapshot,
                   committed) -> None:
     """把执行后的**实际**状态写进 asset_state。
 
-    只能从 `result.committed`（真正落地的 Effect）推导。从 `cls` 推导会在
-    "effect 被门控/被跳过"时把没写进 Immich 的值塞进本地镜像 —— 本地比
+    **来自 `result.committed`（真正落地的 Effect）的输入**：
+    rating / description / visibility —— 只能从 committed 推导。从 `cls` 推导会
+    在"effect 被门控/被跳过"时把没写进 Immich 的值塞进本地镜像 —— 本地比
     远端"新"，比不写更糟（撤销与重置都以此为准）。
+
+    **刻意取「意图」而非 committed 的输入**：current_tag（`cls.tag`）与
+    current_markers（管线算出的 markers）。原因有二，不是疏漏：
+      1. committed 在调用点被压成 `{e.action: e.payload}` 字典，多次 `tag_add`
+         （主标签 + 跳过标记标签）会互相覆盖 —— 它本身对标签维度就是有损的，
+         无法据此还原全部 markers；
+      2. `skip_immich` 契约要求：即使某个标签规定"什么都不写进 Immich"，也必须
+         记下本次分类结果。此时 committed 为空，只有意图能表达"这张图分类过"。
     """
     rating = (committed["rating_set"]["new"] if "rating_set" in committed
               else snapshot.rating)

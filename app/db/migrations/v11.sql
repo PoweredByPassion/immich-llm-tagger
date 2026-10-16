@@ -51,6 +51,10 @@ INSERT INTO sqlite_sequence(name, seq)
 DROP TABLE _cl_seq;
 
 CREATE INDEX IF NOT EXISTS idx_change_log_job ON change_log (job_id);
+-- change_log 永不清理，而 has_system_archive / last_written_value（每图分类要按
+-- asset_id+action 查两次）都按这两列过滤 —— 没有覆盖索引就是每次全表 SCAN。
+CREATE INDEX IF NOT EXISTS idx_change_log_asset_action
+    ON change_log (asset_id, action);
 
 -- 回填：applied_at 历史上从未被写过（§4.4）；不回填则改口径后
 -- 「整库历史资产都被判为未完成」→ 全量重跑 + 大规模 LLM 调用。

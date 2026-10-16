@@ -476,3 +476,18 @@ def test_v11_recreates_change_log_job_index(tmp_path: Path) -> None:
         idx = {r["name"] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'index'")}
     assert "idx_change_log_job" in idx
+
+
+def test_v11_adds_change_log_asset_action_index(tmp_path: Path) -> None:
+    """v11 重建 change_log 时补上 (asset_id, action) 覆盖索引。
+
+    `has_system_archive` 与 `last_written_value`（后者每张图分类调两次）都按
+    `asset_id`（+action）过滤，而 change_log 刻意永不清理 —— 没这个索引这三个
+    热查询每次都全表 SCAN change_log，随库增长线性劣化。
+    """
+    db = Database(tmp_path / "t.db")
+    migrate(db)
+    with db.connect() as conn:
+        idx = {r["name"] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index'")}
+    assert "idx_change_log_asset_action" in idx
