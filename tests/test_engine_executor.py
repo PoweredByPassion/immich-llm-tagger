@@ -18,6 +18,7 @@ from app.db.connection import Database
 from app.db.migrate import migrate
 from app.engine.executor import (
     DEFAULT_PROMPT_TEMPLATE,
+    _already_done,
     build_pipeline_config,
     run_scan_job,
     run_single_job,
@@ -323,8 +324,8 @@ def test_classify_item_already_done_counts_as_done(db: Database,
     """幂等二次确认：资产已 ok → 计 done，不调 LLM。"""
     with db.connect() as conn:
         conn.execute(
-            "INSERT INTO asset_records (asset_id, source, status, dry_run) "
-            "VALUES ('done-asset', 'poll', 'ok', 0)")
+            "INSERT INTO asset_records (asset_id, source, status, dry_run, applied_at) "
+            "VALUES ('done-asset', 'poll', 'ok', 0, datetime('now'))")
     parent = jobs.create_job(db, "scan", {})
     jobs.claim_next(db)                    # 父 → running
     child_id = jobs.create_job(db, "classify_item",
@@ -346,8 +347,8 @@ def test_classify_item_already_done_heals_queue_tag(db: Database,
     """幂等二次确认命中（早退）时补摘队列标签，避免残留「未分类」。"""
     with db.connect() as conn:
         conn.execute(
-            "INSERT INTO asset_records (asset_id, source, status, dry_run) "
-            "VALUES ('done-asset', 'poll', 'ok', 0)")
+            "INSERT INTO asset_records (asset_id, source, status, dry_run, applied_at) "
+            "VALUES ('done-asset', 'poll', 'ok', 0, datetime('now'))")
     parent = jobs.create_job(db, "scan", {})
     jobs.claim_next(db)                    # 父 → running
     child_id = jobs.create_job(db, "classify_item",
@@ -391,7 +392,8 @@ def test_classify_item_lease_conflict_retries_not_failed(db: Database,
         with db_.connect() as conn:
             conn.execute(
                 "INSERT INTO asset_records (asset_id, job_id, source, status, "
-                "dry_run) VALUES (?, ?, 'poll', 'ok', 0)", (asset_id, parent))
+                "dry_run, applied_at) VALUES (?, ?, 'poll', 'ok', 0, "
+                "datetime('now'))", (asset_id, parent))
         return err(asset_id)               # status="error"
 
     monkeypatch.setattr(executor_module, "classify_asset", _side_effect_recorder)
@@ -632,8 +634,8 @@ def test_scan_total_is_candidate_count_and_skips_done(db: Database,
     # a1 已有非 dry_run 的 ok 记录 → "已完成"
     with db.connect() as conn:
         conn.execute(
-            "INSERT INTO asset_records (asset_id, source, status, dry_run) "
-            "VALUES ('a1', 'poll', 'ok', 0)")
+            "INSERT INTO asset_records (asset_id, source, status, dry_run, applied_at) "
+            "VALUES ('a1', 'poll', 'ok', 0, datetime('now'))")
     job_id = jobs.create_job(db, "scan", {"source": "poll"})
     job = jobs.claim_next(db)
     assert job is not None and job.id == job_id
@@ -696,8 +698,9 @@ def test_resumed_scan_only_processes_remaining(db: Database,
     with db.connect() as conn:
         for aid in ("a1", "a2"):
             conn.execute(
-                "INSERT INTO asset_records (asset_id, source, status, dry_run) "
-                "VALUES (?, 'poll', 'ok', 0)", (aid,))
+                "INSERT INTO asset_records (asset_id, source, status, dry_run, "
+                "applied_at) VALUES (?, 'poll', 'ok', 0, datetime('now'))",
+                (aid,))
     job_id = jobs.create_job(db, "scan", {})
     with db.connect() as conn:
         conn.execute("UPDATE jobs SET status='running', done=2, total=4 "
@@ -1141,8 +1144,8 @@ def test_semantics_manual_override_with_ok_record_skipped_by_already_done(
                         lambda client, db, tag, rules: ["a1"])
     with db.connect() as conn:
         conn.execute(
-            "INSERT INTO asset_records (asset_id, source, status, dry_run) "
-            "VALUES ('a1', 'poll', 'ok', 0)")
+            "INSERT INTO asset_records (asset_id, source, status, dry_run, applied_at) "
+            "VALUES ('a1', 'poll', 'ok', 0, datetime('now'))")
         conn.execute(
             "INSERT INTO asset_state (asset_id, manual_override) "
             "VALUES ('a1', 1)")
@@ -1212,7 +1215,8 @@ def test_backfill_skips_already_done_not_in_total(db, monkeypatch):
 
     with db.connect() as conn:
         conn.execute("INSERT INTO asset_records (asset_id, source, status, "
-                     "dry_run) VALUES ('a-1', 'poll', 'ok', 0)")
+                     "dry_run, applied_at) "
+                     "VALUES ('a-1', 'poll', 'ok', 0, datetime('now'))")
     jid = jobs.create_job(db, "backfill", {})
     run_job(db, FakeClient(), None, jobs.get_job(db, jid))
 
@@ -1424,8 +1428,8 @@ def test_scan_heals_stuck_queue_tag(db: Database, monkeypatch) -> None:
 
     with db.connect() as conn:
         conn.execute(
-            "INSERT INTO asset_records (asset_id, source, status, dry_run) "
-            "VALUES ('a1', 'poll', 'ok', 0)")
+            "INSERT INTO asset_records (asset_id, source, status, dry_run, applied_at) "
+            "VALUES ('a1', 'poll', 'ok', 0, datetime('now'))")
     job_id = jobs.create_job(db, "scan", {"source": "poll"})
     job = jobs.get_job(db, job_id)
 
@@ -1459,8 +1463,8 @@ def test_scan_heal_failure_does_not_break_scan(db: Database, monkeypatch) -> Non
 
     with db.connect() as conn:
         conn.execute(
-            "INSERT INTO asset_records (asset_id, source, status, dry_run) "
-            "VALUES ('a1', 'poll', 'ok', 0)")
+            "INSERT INTO asset_records (asset_id, source, status, dry_run, applied_at) "
+            "VALUES ('a1', 'poll', 'ok', 0, datetime('now'))")
     job_id = jobs.create_job(db, "scan", {"source": "poll"})
     job = jobs.claim_next(db)
     assert job is not None and job.id == job_id
@@ -1486,3 +1490,46 @@ def test_default_prompt_template_declares_new_contract():
     assert "{{TAG_LIST}}" in DEFAULT_PROMPT_TEMPLATE        # 强制占位符仍在
     # description 必须排在 tag 之前（Visual CoT，D3）
     assert DEFAULT_PROMPT_TEMPLATE.index("description") < DEFAULT_PROMPT_TEMPLATE.index('"tag"')
+
+
+# -------------------------------------------「已完成」口径（Task 10）
+
+
+def test_already_done_uses_latest_record(db: Database) -> None:
+    """旧的已应用记录 + 新的失败记录 → 必须判"未完成"，否则失败那次永不重试。"""
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO asset_records (asset_id, source, status, dry_run, "
+            "  created_at, applied_at) VALUES "
+            "('a1','poll','ok',0,'2026-01-01 00:00:00','2026-01-01 00:00:01'),"
+            "('a1','manual','ok',0,'2026-02-01 00:00:00',NULL)")
+    assert _already_done(db, "a1") is False
+
+
+def test_already_done_true_when_applied(db: Database) -> None:
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO asset_records (asset_id, source, status, dry_run, "
+            "  created_at, applied_at) VALUES "
+            "('a1','poll','ok',0,'2026-01-01 00:00:00','2026-01-01 00:00:01')")
+    assert _already_done(db, "a1") is True
+
+
+def test_already_done_false_when_applied_at_missing(db: Database) -> None:
+    """status='ok' 但没 applied_at = apply 失败挂起 → 必须重试。"""
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO asset_records (asset_id, source, status, dry_run) "
+            "VALUES ('a1','poll','ok',0)")
+    assert _already_done(db, "a1") is False
+
+
+def test_already_done_true_when_retries_exhausted(db: Database) -> None:
+    """§7.3：放弃重试也是终态，否则永久失败的资产会无限重跑。"""
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO asset_records (asset_id, source, status, dry_run) "
+            "VALUES ('a1','poll','ok',0)")
+        conn.execute("INSERT INTO asset_state (asset_id, apply_attempts) "
+                     "VALUES ('a1', 3)")
+    assert _already_done(db, "a1") is True

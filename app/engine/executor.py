@@ -429,15 +429,30 @@ def start_scan_coordinator(db_path: str | Path,
 
 
 def _already_done(db: Database, asset_id: str) -> bool:
-    """"已完成"过滤：asset_records 有 dry_run=false AND status=ok 的记录
-    （权威来源是 asset_records 而非 asset_state）。"""
+    """"已完成"过滤。看**最新一条**非 dry_run 记录（不是"存在任一条"）：
+    资产被 reclassify 后可能同时有"旧的已应用记录"与"新的失败记录"，
+    用 EXISTS 会让失败那次永不重试（§7.1）。
+
+    已完成 ⇔ 最新记录 status='ok' AND applied_at IS NOT NULL
+             OR 重试已耗尽（apply_attempts ≥ apply_max_attempts，§7.3）。
+    """
     with db.connect() as conn:
         row = conn.execute(
-            "SELECT 1 FROM asset_records "
-            "WHERE asset_id = ? AND dry_run = 0 AND status = 'ok' LIMIT 1",
+            "SELECT status, applied_at FROM asset_records "
+            " WHERE asset_id = ? AND dry_run = 0 "
+            " ORDER BY created_at DESC, id DESC LIMIT 1",
             (asset_id,),
         ).fetchone()
-    return row is not None
+        if row is not None and row["status"] == "ok" and row["applied_at"] is not None:
+            return True
+        st = conn.execute(
+            "SELECT apply_attempts FROM asset_state WHERE asset_id = ?",
+            (asset_id,),
+        ).fetchone()
+        if st is None:
+            return False
+    # 连接已关：SettingsStore 会自己开连接（WAL 下并发读安全）
+    return int(st["apply_attempts"]) >= int(SettingsStore(db).get("apply_max_attempts"))
 
 
 def _heal_queue_tag(db: Database, client, asset_id: str, queue_tag_name: str) -> None:
