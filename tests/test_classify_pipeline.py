@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.classify import pipeline as pipeline_module
-from app.classify.apply import ApplyPlan
+from app.classify.commit import CommitResult
 from app.classify.lease import LLM_MAX_RETRIES, claim, lease_seconds_for
 from app.classify.parse import TagDef
 from app.classify.pipeline import PipelineConfig, PipelineResult, classify_asset
@@ -42,7 +42,8 @@ def db(tmp_path: Path) -> Database:
 class FakeClient:
     """Immich 替身：记录每类方法的调用次数，可注入失败。"""
 
-    def __init__(self, *, thumb_fail: bool = False, thumb_bytes: bytes = b"fake-img"):
+    def __init__(self, *, thumb_fail: bool = False, thumb_bytes: bytes = b"fake-img",
+                 fail_on=None):
         self.get_asset_calls = 0
         self.get_asset_calls_before_llm = 0
         self.get_asset_events: list[str] = []
@@ -51,6 +52,14 @@ class FakeClient:
         self.write_calls: list[str] = []
         self.thumb_fail = thumb_fail
         self.thumb_bytes = thumb_bytes
+        self.fail_on = fail_on
+        self.set_props_calls: list[dict] = []
+        self.user_rating: int | None = None          # get_asset 返回的"当前评分"
+        self.user_description: str | None = None
+
+    def _maybe_fail(self, name: str) -> None:
+        if self.fail_on == name:
+            raise ImmichError(f"injected {name} failure")
 
     def get_asset(self, asset_id: str):
         self.get_asset_calls += 1
@@ -69,7 +78,10 @@ class FakeClient:
                 exposure_time=None,
                 date_original=None,
                 city=None,
+                rating=self.user_rating,          # ← 新增
+                description=self.user_description,  # ← 新增
             ),
+            tags=[],
             local_date_time=None,
             visibility="timeline",
         )
@@ -86,9 +98,11 @@ class FakeClient:
         return {n: f"tag-id-{n}" for n in names}
 
     def tag_assets(self, tag_ids, asset_ids):
+        self._maybe_fail("tag_assets")
         self.write_calls.append(("tag_assets", list(tag_ids), list(asset_ids)))
 
     def untag_assets(self, tag_id, asset_ids):
+        self._maybe_fail("untag_assets")
         self.write_calls.append(("untag_assets", tag_id, list(asset_ids)))
 
     def set_visibility(self, asset_ids, visibility):
@@ -99,7 +113,22 @@ class FakeClient:
         return f"album-id-{name}"
 
     def add_to_album(self, album_id, asset_ids):
+        self._maybe_fail("add_to_album")
         self.write_calls.append(("add_to_album", album_id, list(asset_ids)))
+
+    def set_asset_properties(self, asset_ids, **props):
+        self._maybe_fail("set_asset_properties")
+        self.write_calls.append(("set_asset_properties", list(asset_ids), props))
+        self.set_props_calls.append(props)
+
+    @property
+    def tagged_names(self) -> list[str]:
+        """所有 tag_assets 调用涉及的标签名（fake 的 tag id 形如 tag-id-<name>）。"""
+        out: list[str] = []
+        for call in self.write_calls:
+            if call[0] == "tag_assets":
+                out += [str(t).removeprefix("tag-id-") for t in call[1]]
+        return out
 
 
 class FakeLLM:
@@ -154,6 +183,9 @@ def make_cfg(*, tags=None, template: str = TEMPLATE, **overrides) -> PipelineCon
         queue_tag_name="queue",
         llm=LLMConn(base_url="http://llm", api_key="k", model=MODEL, timeout=30),
         concurrency_owner=42,
+        enabled_effects={"tag", "visibility", "album", "rating", "description"},
+        skip_marker_tag_name="保留人工信息",
+        apply_max_attempts=3,
     )
     defaults.update(overrides)
     return PipelineConfig(**defaults)
@@ -239,6 +271,8 @@ def test_normal_path_writes_full_record_and_applies(db: Database) -> None:
         "llm_request": r["llm_request"],
         "dry_run": 0,
         "filename": "IMG_0001.png",
+        "rating": None,
+        "description": None,
         "created_at": r["created_at"],
         "applied_at": r["applied_at"],
     }
@@ -437,23 +471,19 @@ def test_source_is_required() -> None:
 # ------------------------------------------------------- 失败模式 10
 
 
-def test_record_survives_applier_failure(db: Database) -> None:
+def test_record_survives_applier_failure(
+    db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """#10 分类成功但 apply 失败：asset_records 仍在，异常不穿透。"""
     llm = make_llm_ok()
 
-    def boom(db_, client_, plan, **kw):
+    def boom(*args, **kw):
         raise RuntimeError("apply exploded")
 
-    import app.classify.pipeline as pl
-
-    orig = pl.apply_plan
-    pl.apply_plan = boom
-    try:
-        result = classify_asset(
-            db, FakeClient(), llm, "asset-1", make_cfg(), source="manual"
-        )
-    finally:
-        pl.apply_plan = orig
+    monkeypatch.setattr(pipeline_module, "commit_effects", boom)
+    result = classify_asset(
+        db, FakeClient(), llm, "asset-1", make_cfg(), source="manual"
+    )
     assert result.status == "ok"  # 分类本身是成功的
     assert len(_records(db)) == 1
     assert _records(db)[0]["status"] == "ok"
@@ -482,7 +512,7 @@ def test_archive_true_path(db: Database) -> None:
     client = FakeClient()
     llm = FakeLLM(['{"tag": "dog", "confidence": 0.95}'])  # ≥ 0.8
     classify_asset(db, client, llm, "asset-1", make_cfg(), source="manual")
-    assert ("set_visibility", ["asset-1"], "archive") in client.write_calls
+    assert client.set_props_calls == [{"visibility": "archive"}]
     with db.connect() as conn:
         state = conn.execute(
             "SELECT visibility FROM asset_state WHERE asset_id='asset-1'"
@@ -569,7 +599,7 @@ def test_override_manual_false_forces_full_apply_despite_state_bit(
     db: Database, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """override_manual=False：即使 asset_state.manual_override=1，
-    apply_plan 也收到 False（reclassify 全量应用语义）。"""
+    commit_effects 也收到 gates.manual_override=False（reclassify 全量应用语义）。"""
     with db.connect() as conn:
         conn.execute(
             "INSERT INTO asset_state (asset_id, manual_override) "
@@ -577,15 +607,16 @@ def test_override_manual_false_forces_full_apply_despite_state_bit(
         )
     captured: dict[str, object] = {}
 
-    def spy_apply(db_, client_, plan, **kw):
+    def spy(db_, client_, effects, **kw):
         captured.update(kw)
+        return CommitResult(ok=True, committed=[])
 
-    monkeypatch.setattr(pipeline_module, "apply_plan", spy_apply)
+    monkeypatch.setattr(pipeline_module, "commit_effects", spy)
     classify_asset(
         db, FakeClient(), make_llm_ok(), "asset-1", make_cfg(),
         source="manual", override_manual=False,
     )
-    assert captured["manual_override"] is False
+    assert captured["gates"].manual_override is False
 
 
 def test_override_manual_true_overrides_state_bit(
@@ -599,15 +630,16 @@ def test_override_manual_true_overrides_state_bit(
         )
     captured: dict[str, object] = {}
 
-    def spy_apply(db_, client_, plan, **kw):
+    def spy(db_, client_, effects, **kw):
         captured.update(kw)
+        return CommitResult(ok=True, committed=[])
 
-    monkeypatch.setattr(pipeline_module, "apply_plan", spy_apply)
+    monkeypatch.setattr(pipeline_module, "commit_effects", spy)
     classify_asset(
         db, FakeClient(), make_llm_ok(), "asset-1", make_cfg(),
         source="manual", override_manual=True,
     )
-    assert captured["manual_override"] is True
+    assert captured["gates"].manual_override is True
 
 
 def cfg_llm() -> LLMConn:
@@ -740,7 +772,7 @@ def test_release_delegated_to_lease_module(
 def test_queue_tag_id_comes_from_ensure_tags(
     db: Database, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """apply_plan 收到的 queue_tag_id 是 ensure_tags 返回的真实 id，不是名字拼接。"""
+    """commit_effects 收到的 queue_tag_id 是 ensure_tags 返回的真实 id，不是名字拼接。"""
     client = FakeClient()
 
     def fake_ensure_tags(names):
@@ -750,13 +782,12 @@ def test_queue_tag_id_comes_from_ensure_tags(
     monkeypatch.setattr(client, "ensure_tags", fake_ensure_tags)
 
     seen: list[dict] = []
-    orig = pipeline_module.apply_plan
 
-    def spy(db_, client_, plan, **kw):
+    def spy(db_, client_, effects, **kw):
         seen.append(kw)
-        return orig(db_, client_, plan, **kw)
+        return CommitResult(ok=True, committed=[])
 
-    monkeypatch.setattr(pipeline_module, "apply_plan", spy)
+    monkeypatch.setattr(pipeline_module, "commit_effects", spy)
     classify_asset(db, client, make_llm_ok(), "asset-1", make_cfg(),
                    source="manual")
     assert seen[0]["queue_tag_id"] == "immich-uuid-queue"
@@ -765,40 +796,38 @@ def test_queue_tag_id_comes_from_ensure_tags(
 def test_manual_override_read_from_asset_state(
     db: Database, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """asset_state.manual_override=1 → apply_plan 收到 manual_override=True。"""
+    """asset_state.manual_override=1 → commit_effects 收到 gates.manual_override=True。"""
     with db.connect() as conn:
         conn.execute(
             "INSERT INTO asset_state (asset_id, manual_override) "
             "VALUES ('asset-1', 1)"
         )
     seen: list[dict] = []
-    orig = pipeline_module.apply_plan
 
-    def spy(db_, client_, plan, **kw):
+    def spy(db_, client_, effects, **kw):
         seen.append(kw)
-        return orig(db_, client_, plan, **kw)
+        return CommitResult(ok=True, committed=[])
 
-    monkeypatch.setattr(pipeline_module, "apply_plan", spy)
+    monkeypatch.setattr(pipeline_module, "commit_effects", spy)
     classify_asset(db, FakeClient(), make_llm_ok(), "asset-1", make_cfg(),
                    source="manual")
-    assert seen[0]["manual_override"] is True
+    assert seen[0]["gates"].manual_override is True
 
 
 def test_manual_override_defaults_false_without_state_row(
     db: Database, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """无 asset_state 行（dry_run 场景等）→ manual_override=False。"""
+    """无 asset_state 行（dry_run 场景等）→ gates.manual_override=False。"""
     seen: list[dict] = []
-    orig = pipeline_module.apply_plan
 
-    def spy(db_, client_, plan, **kw):
+    def spy(db_, client_, effects, **kw):
         seen.append(kw)
-        return orig(db_, client_, plan, **kw)
+        return CommitResult(ok=True, committed=[])
 
-    monkeypatch.setattr(pipeline_module, "apply_plan", spy)
+    monkeypatch.setattr(pipeline_module, "commit_effects", spy)
     classify_asset(db, FakeClient(), make_llm_ok(), "asset-1", make_cfg(),
                    source="manual")
-    assert seen[0]["manual_override"] is False
+    assert seen[0]["gates"].manual_override is False
 
 
 # ------------------------------- M5 Task 9: manual_override scan 重跑语义钉合
@@ -836,8 +865,8 @@ def test_semantics_manual_override_rerun_retags_but_not_visibility_album(
     # ① 打新 + ④ 摘队列标签 都发生
     assert "tag_assets" in kinds
     assert "untag_assets" in kinds
-    # ②③ 被跳过：不动可见性、不进相册
-    assert "set_visibility" not in kinds
+    # ②③ 被跳过：属性桶整体为空（不动可见性/评分/描述）、不进相册
+    assert client.set_props_calls == []
     assert "add_to_album" not in kinds
     assert "ensure_album" not in kinds
 
@@ -863,7 +892,7 @@ def test_skip_immich_tag_no_immich_writes(db: Database) -> None:
     kinds = [c[0] for c in client.write_calls]
     assert "tag_assets" not in kinds
     assert "ensure_album" not in kinds and "add_to_album" not in kinds
-    assert "set_visibility" not in kinds
+    assert client.set_props_calls == []
     assert kinds.count("untag_assets") == 1
 
     # asset_records 正常记录分类结果
@@ -873,3 +902,143 @@ def test_skip_immich_tag_no_immich_writes(db: Database) -> None:
             "WHERE asset_id = 'asset-1'"
         ).fetchone()
     assert rec["predicted_tag"] == "normal_photo" and rec["status"] == "ok"
+
+
+# ------------------------------------- Task 9: effector 接线 + 跳过 + 成功闸门
+
+RATING_JSON = ('{"tag": "cat", "confidence": 0.9, "sensitive": false, '
+               '"reason": "ok", "rating": 4, "description": "一只猫"}')
+
+
+def test_pipeline_writes_rating_and_description(db: Database) -> None:
+    client = FakeClient()
+    llm = FakeLLM([RATING_JSON])
+    classify_asset(db, client, llm, "asset-1", make_cfg(), source="poll", job_id=1)
+    assert client.set_props_calls == [{"rating": 4, "description": "一只猫"}]
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT rating, description FROM asset_state WHERE asset_id='asset-1'"
+        ).fetchone()
+    assert (row["rating"], row["description"]) == (4, "一只猫")
+
+
+def test_pipeline_records_analysis_output_in_records(db: Database) -> None:
+    """§7.3 复用重试的前提：记录里必须存得住全部判定。"""
+    classify_asset(db, FakeClient(), FakeLLM([RATING_JSON]), "asset-1",
+                   make_cfg(), source="poll")
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT rating, description FROM asset_records WHERE asset_id='asset-1'"
+        ).fetchone()
+    assert (row["rating"], row["description"]) == (4, "一只猫")
+
+
+def test_pipeline_marks_skip_when_user_value_present(db: Database) -> None:
+    """用户手写 5 → 不覆盖评分，并且打上跳过标记（D6）。"""
+    client = FakeClient()
+    client.user_rating = 5
+    classify_asset(db, client, FakeLLM([RATING_JSON]), "asset-1",
+                   make_cfg(), source="poll")
+    assert [c for c in client.set_props_calls if "rating" in c] == []
+    assert "保留人工信息" in client.tagged_names
+
+
+def test_skip_marker_payload_records_which_fields_were_skipped(db: Database) -> None:
+    """§5.8：跳过了哪些字段要进 change_log.payload（供 UI 展示与排障）。
+
+    这条同时钉住"标记标签的变更**有账**"（§5.5 不变式：每一次成功写入都要有记录）。
+    """
+    client = FakeClient()
+    client.user_rating = 5
+    classify_asset(db, client, FakeLLM([RATING_JSON]), "asset-1",
+                   make_cfg(), source="poll")
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT payload FROM change_log WHERE asset_id='asset-1' "
+            "AND action='tag_add' ORDER BY id DESC LIMIT 1").fetchone()
+    assert json.loads(row["payload"]) == {
+        "tag_name": "保留人工信息", "skipped": ["rating"]}
+
+
+def test_pipeline_does_not_mark_when_value_is_ours(db: Database) -> None:
+    """重试场景：快照里的值就是本系统上次写的 → 跳过但不打标记（§5.8.1）。"""
+    client = FakeClient()
+    client.user_rating = 4                    # == 我们上次写的 new
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO change_log (asset_id, action, direction, payload) "
+            "VALUES ('asset-1','rating_set','apply','{\"old\": null, \"new\": 4}')")
+    classify_asset(db, client, FakeLLM([RATING_JSON]), "asset-1",
+                   make_cfg(), source="poll")
+    assert [c for c in client.set_props_calls if "rating" in c] == []
+    assert "保留人工信息" not in client.tagged_names
+
+
+def test_pipeline_skips_marker_when_metadata_blocked(db: Database) -> None:
+    """manual_override：评分/描述一律不写，也**不**打跳过标记
+    （不是"保留了人工信息"，是这次压根不处理）。"""
+    client = FakeClient()
+    client.user_rating = 5
+    with db.connect() as conn:
+        conn.execute("INSERT INTO asset_state (asset_id, manual_override) "
+                     "VALUES ('asset-1', 1)")
+    classify_asset(db, client, FakeLLM([RATING_JSON]), "asset-1",
+                   make_cfg(), source="poll")
+    assert client.set_props_calls == []
+    assert "保留人工信息" not in client.tagged_names
+
+
+def test_applied_at_set_only_after_full_success(db: Database) -> None:
+    classify_asset(db, FakeClient(), FakeLLM([RATING_JSON]), "asset-1",
+                   make_cfg(), source="poll", job_id=1)
+    with db.connect() as conn:
+        row = conn.execute("SELECT status, applied_at FROM asset_records "
+                           "ORDER BY id DESC LIMIT 1").fetchone()
+    assert row["status"] == "ok" and row["applied_at"] is not None
+
+
+def test_applied_at_absent_when_tag_bucket_fails(db: Database) -> None:
+    """apply 失败 → 不写 applied_at（下轮 scan 才会重试，§7.1）。"""
+    client = FakeClient()
+    client.fail_on = "tag_assets"
+    classify_asset(db, client, FakeLLM([RATING_JSON]), "asset-1",
+                   make_cfg(), source="poll", job_id=1)
+    with db.connect() as conn:
+        row = conn.execute("SELECT applied_at FROM asset_records "
+                           "ORDER BY id DESC LIMIT 1").fetchone()
+    assert row["applied_at"] is None
+    # 队列标签仍在：Finalizer 没跑
+    assert not [c for c in client.write_calls if c[0] == "untag_assets"]
+
+
+def test_give_up_tags_the_asset_after_max_attempts(db: Database) -> None:
+    """§7.3：达到上限 → 打跳过标记标签，让它在 Immich 里可见。
+
+    ⚠ 注入的失败**不能**是 `tag_assets` —— `_tag_gave_up` 自己也调
+    `tag_assets` 打这个标记，同一个故障会让它一起挂掉，断言全部落空。
+    换属性桶：它在 `_BUCKET_ORDER` 里排最前，失败后标签桶根本没跑，
+    放弃路径的 `tag_assets` 是健康的。
+    """
+    client = FakeClient()
+    client.fail_on = "set_asset_properties"
+    cfg = make_cfg(apply_max_attempts=1)
+    classify_asset(db, client, FakeLLM([RATING_JSON]), "asset-1", cfg, source="poll")
+    assert client.tagged_names == ["保留人工信息"]     # 主标签没打上（标签桶没跑）
+    with db.connect() as conn:
+        actions = [r["action"] for r in conn.execute(
+            "SELECT action FROM change_log WHERE asset_id='asset-1' ORDER BY id")]
+        assert conn.execute(
+            "SELECT apply_attempts FROM asset_state WHERE asset_id='asset-1'"
+        ).fetchone()["apply_attempts"] == 1
+    assert "tag_add" in actions            # 打标这个写入有账（§5.5 不变式）
+
+
+def test_give_up_does_not_reset_applied_at(db: Database) -> None:
+    """放弃 ≠ 应用成功：applied_at 必须仍是 NULL（§7.3 评审纠正）。"""
+    client = FakeClient()
+    client.fail_on = "tag_assets"
+    classify_asset(db, client, FakeLLM([RATING_JSON]), "asset-1",
+                   make_cfg(apply_max_attempts=1), source="poll")
+    with db.connect() as conn:
+        assert conn.execute("SELECT applied_at FROM asset_records").fetchone()[
+            "applied_at"] is None

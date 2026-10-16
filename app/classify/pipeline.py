@@ -9,13 +9,20 @@ import json
 import time
 from dataclasses import dataclass
 
-from app.classify.apply import ApplyPlan, apply_plan
+from app.classify.commit import CommitResult, commit_effects
+from app.classify.effectors import plan_all
+from app.classify.effectors.base import Effect, EffectContext, Gates, PlanOutcome
 from app.classify.lease import LLM_MAX_RETRIES, claim, lease_seconds_for, release, renew
 from app.classify.parse import decide_archive, extract_json, normalize
 from app.classify.prompt import PromptContext, render_prompt
+from app.classify.snapshot import AssetSnapshot
 from app.classify.thumb import ThumbConfig, fetch_and_encode
 from app.db.connection import Database
+from app.store.assets import (
+    has_system_archive, last_written_value, write_changes_and_state,
+)
 from app.store.connections import LLMConn
+from app.store.events import log_event
 from app.store.tags import TagDef
 
 
@@ -32,6 +39,12 @@ class PipelineConfig:
     queue_tag_name: str
     llm: LLMConn
     concurrency_owner: int
+    # --- Effector 开关与重试（§8.1）---
+    # 默认值让既有构造点无需改动；生产路径由 build_pipeline_config 覆盖。
+    enabled_effects: frozenset[str] = frozenset(
+        {"tag", "visibility", "album", "rating", "description"})
+    skip_marker_tag_name: str = "保留人工信息"
+    apply_max_attempts: int = 3
 
 
 @dataclass(frozen=True)
@@ -130,6 +143,7 @@ def classify_asset(
     prompt_version_id: int | None = None,
     asset_hint: dict | None = None,
     override_manual: bool | None = None,
+    allow_metadata_overwrite: bool | None = None,
 ) -> PipelineResult:
     # 统一将 asset_id 收敛为 str，下游（租约/记录/Applier）全部按 str 处理。
     asset_id = str(asset_id)
@@ -141,7 +155,8 @@ def classify_asset(
                         dry_run=dry_run, job_id=job_id,
                         prompt_version_id=prompt_version_id,
                         asset_hint=asset_hint, lease_seconds=lease_seconds,
-                        override_manual=override_manual)
+                        override_manual=override_manual,
+                        allow_metadata_overwrite=allow_metadata_overwrite)
     except Exception:
         return _error_result(asset_id, dry_run)
     finally:
@@ -150,7 +165,7 @@ def classify_asset(
 
 def _process(db, client, llm, asset_id, cfg, *, source, dry_run, job_id,
              prompt_version_id, asset_hint, lease_seconds,
-             override_manual) -> PipelineResult:
+             override_manual, allow_metadata_overwrite=False) -> PipelineResult:
     started = time.monotonic()
     # 取图/渲染 prompt 阶段就失败时没有请求可记，error 路径留 None。
     request_snapshot: str | None = None
@@ -208,7 +223,8 @@ def _process(db, client, llm, asset_id, cfg, *, source, dry_run, job_id,
                   raw_response=raw_text, llm_request=request_snapshot,
                   dry_run=dry_run, job_id=job_id,
                   prompt_version_id=prompt_version_id, duration_ms=duration_ms,
-                  filename=filename)
+                  filename=filename, rating=cls.rating,
+                  description=cls.description)
 
     if dry_run:
         return PipelineResult(asset_id=asset_id, tag=cls.tag,
@@ -218,36 +234,165 @@ def _process(db, client, llm, asset_id, cfg, *, source, dry_run, job_id,
     selected = next((t for t in cfg.tags
                      if t.kind == "primary" and t.enabled and t.name == cls.tag), None)
     archive = decide_archive(selected, cls.confidence, cfg.default_min_confidence)
-    plan = ApplyPlan(
-        asset_id=asset_id,
-        primary_tag=cls.tag,
-        marker_tags=cls.markers,
-        archive=archive,
-        album=selected.album if selected is not None else None,
-        queue_tag=cfg.queue_tag_name,
-        skip_immich=selected.skip_immich if selected is not None else False,
+
+    # override_manual 非 None 时替代 DB 读取（reclassify 用户显式发起 → 全量 apply）。
+    # ⚠ 这段原来在被替换的 try 块**内部**，重建时必须挪到构建 ctx 之前。
+    if override_manual is not None:
+        effective_manual_override = override_manual
+    else:
+        with db.connect() as conn:
+            row = conn.execute(
+                "SELECT manual_override FROM asset_state WHERE asset_id = ?",
+                (asset_id,),
+            ).fetchone()
+        effective_manual_override = bool(row["manual_override"]) if row else False
+
+    snapshot = _snapshot(client, asset_id, asset_hint)
+    gates = Gates(
+        dry_run=False,                       # 已在上面的 if dry_run 里返回
+        manual_override=effective_manual_override,
+        skip_immich=bool(getattr(selected, "skip_immich", False)),
+        allow_metadata_overwrite=bool(allow_metadata_overwrite),
     )
+    ctx = EffectContext(
+        asset_id=asset_id, analysis=cls, snapshot=snapshot, tag_def=selected,
+        archive=archive, enabled=cfg.enabled_effects, gates=gates)
+    outcome = PlanOutcome()
+    effects = plan_all(
+        ctx,
+        last_written={
+            "rating_set": last_written_value(db, asset_id, "rating_set"),
+            "description_set": last_written_value(db, asset_id, "description_set"),
+        },
+        outcome=outcome,
+        has_system_archive=has_system_archive(db, asset_id),
+    )
+    # 跳过标记：唯一一处跨 effector 信息流（§5.4），由管线统一裁决。
+    # `skipped` 一并写进 payload —— §5.8 要求它进 change_log 供 UI 与排障。
+    if outcome.skipped:
+        effects.append(Effect("tag_add", asset_id,
+                              {"tag_name": cfg.skip_marker_tag_name,
+                               "skipped": sorted(outcome.skipped)}))
+
+    queue_ids = client.ensure_tags([cfg.queue_tag_name])
     try:
-        # override_manual 非 None 时替代 DB 读取（reclassify 用户显式发起→全量 apply）
-        if override_manual is not None:
-            effective_manual_override = override_manual
-        else:
-            with db.connect() as conn:
-                row = conn.execute(
-                    "SELECT manual_override FROM asset_state WHERE asset_id = ?",
-                    (asset_id,),
-                ).fetchone()
-            effective_manual_override = bool(row["manual_override"]) if row else False
-        tag_ids = client.ensure_tags([cfg.queue_tag_name])
-        apply_plan(db, client, plan, job_id=job_id,
-                   queue_tag_id=tag_ids[cfg.queue_tag_name],
-                   manual_override=effective_manual_override)
-    except Exception:
-        # 分类已成功且 asset_records 已落（记录描述"分类过"，变更描述"改过"）。
-        # apply 失败不改写结果状态，重试由上层决定。
-        pass
+        result = commit_effects(
+            db, client, effects, asset_id=asset_id, job_id=job_id,
+            queue_tag_id=queue_ids[cfg.queue_tag_name],
+            queue_tag_name=cfg.queue_tag_name, gates=gates)
+    except Exception as exc:          # noqa: BLE001
+        # 提交器的**意外**异常（Immich 侧的正常失败走 CommitResult(ok=False)，
+        # 不抛）。分类已成功且 asset_records 已落 —— 不改写"分类过"这个事实，
+        # 只按 apply 失败处理：不写 applied_at，下轮 scan 带着复用重试。
+        log_event(db, "system", "apply_failed",
+                  {"asset_id": asset_id, "bucket": "unknown", "error": str(exc)})
+        result = CommitResult(ok=False, error=str(exc))
+
+    markers = tuple(dict.fromkeys(
+        [*cls.markers, *([cfg.skip_marker_tag_name] if outcome.skipped else [])]))
+    if result.ok:
+        _mark_applied(db, asset_id)
+    else:
+        _apply_failed(db, client, asset_id, error=result.error,
+                      max_attempts=cfg.apply_max_attempts,
+                      skip_marker_tag_name=cfg.skip_marker_tag_name)
+    with db.connect() as conn:
+        _update_state(conn, asset_id=asset_id, job_id=job_id, tag=cls.tag,
+                      markers=markers, snapshot=snapshot,
+                      committed={e.action: e.payload for e in result.committed})
     return PipelineResult(asset_id=asset_id, tag=cls.tag, confidence=cls.confidence,
-                          markers=cls.markers, status=status, dry_run=False)
+                          markers=markers, status=status, dry_run=False)
+
+
+def _snapshot(client, asset_id: str, asset_hint: dict | None) -> AssetSnapshot:
+    """取当前值快照（§5.3）。
+
+    hint **不带 visibility**（`hooks.py:40` 的 `_HINT_FIELDS`），而 visibility
+    默认启用 → 默认配置下每个 webhook 都会回退一次 get_asset()。这是刻意的：
+    hint 里的 exifInfo 是否真带 rating/description 未经实测（§12），所以只有当
+    hint 覆盖了全部所需字段时才敢信它。代价是每图多一次轻量 GET。
+    """
+    if asset_hint is not None:
+        snap = AssetSnapshot.from_hint(asset_hint)
+        if snap.visibility is not None:
+            return snap
+    return AssetSnapshot.from_dto(client.get_asset(asset_id))
+
+
+def _mark_applied(db, asset_id: str) -> None:
+    """成功闸门通过：给**最新那条** dry_run=0 的记录补 applied_at（§7.1）。
+
+    口径必须与 `_already_done` 一致（同样取最新一条），否则重试场景会给
+    旧记录盖章、新记录仍无凭据 —— 而 _already_done 看的正是新记录。
+    """
+    with db.connect() as conn:
+        conn.execute(
+            "UPDATE asset_records SET applied_at = datetime('now') "
+            " WHERE id = (SELECT id FROM asset_records "
+            "              WHERE asset_id = ? AND dry_run = 0 "
+            "              ORDER BY created_at DESC, id DESC LIMIT 1)",
+            (asset_id,),
+        )
+
+
+def _update_state(conn, *, asset_id, job_id, tag, markers, snapshot,
+                  committed) -> None:
+    """把执行后的**实际**状态写进 asset_state。
+
+    只能从 `result.committed`（真正落地的 Effect）推导。从 `cls` 推导会在
+    "effect 被门控/被跳过"时把没写进 Immich 的值塞进本地镜像 —— 本地比
+    远端"新"，比不写更糟（撤销与重置都以此为准）。
+    """
+    rating = (committed["rating_set"]["new"] if "rating_set" in committed
+              else snapshot.rating)
+    description = (committed["description_set"]["new"]
+                   if "description_set" in committed else snapshot.description)
+    if "archive" in committed:
+        visibility = "archive"
+    elif "timeline" in committed:
+        visibility = "timeline"
+    else:
+        visibility = snapshot.visibility
+    write_changes_and_state(
+        conn, asset_id=asset_id, job_id=job_id, changes=[],
+        current_tag=tag, current_markers=list(markers), visibility=visibility,
+        rating=rating, description=description,
+    )
+
+
+def _apply_failed(db, client, asset_id: str, *, error, max_attempts,
+                  skip_marker_tag_name: str) -> None:
+    """失败：不写 applied_at、不摘队列标签；计数 +1，达上限则放弃（§7.3）。"""
+    from app.store.assets import bumped_apply_attempts
+
+    n = bumped_apply_attempts(db, asset_id)
+    if n < max_attempts:
+        log_event(db, "system", "apply_retry",
+                  {"asset_id": asset_id, "attempts": n, "error": error})
+        return
+    log_event(db, "system", "apply_gave_up",
+              {"asset_id": asset_id, "attempts": n, "error": error})
+    _tag_gave_up(db, client, asset_id, skip_marker_tag_name)
+
+
+def _tag_gave_up(db, client, asset_id: str, tag_name: str) -> None:
+    """给"放弃重试"的资产打标记标签（§7.3），并落账（§5.5 不变式）。
+
+    打标失败不能反过来把管线搞挂：放弃本身就是终态，标记只是给人的线索。
+    """
+    try:
+        tag_ids = client.ensure_tags([tag_name])
+        client.tag_assets([tag_ids[tag_name]], [asset_id])
+    except Exception as exc:                      # noqa: BLE001
+        log_event(db, "system", "apply_gave_up_tag_failed",
+                  {"asset_id": asset_id, "error": str(exc)})
+        return
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO change_log (job_id, asset_id, action, direction, payload) "
+            "VALUES (NULL, ?, 'tag_add', 'apply', ?)",
+            (asset_id, json.dumps({"tag_name": tag_name}, ensure_ascii=False)),
+        )
 
 
 def _primary_names(cfg: PipelineConfig) -> list[tuple[str, str]]:
@@ -266,14 +411,17 @@ def _ms(started: float) -> int:
 
 def _write_record(db, asset_id, *, source, tag, confidence, markers, model, usage,
                   status, raw_response, llm_request, dry_run, job_id,
-                  prompt_version_id, duration_ms, filename=None) -> None:
+                  prompt_version_id, duration_ms, filename=None,
+                  rating=None, description=None) -> None:
     with db.connect() as conn:
         conn.execute(
             "INSERT INTO asset_records (asset_id, job_id, prompt_version_id, source, "
             "  predicted_tag, confidence, markers, model, usage, duration_ms, "
-            "  status, raw_response, llm_request, dry_run, filename) "
+            "  status, raw_response, llm_request, dry_run, filename, "
+            "  rating, description) "
             "VALUES (:aid, :job_id, :pv_id, :source, :tag, :conf, :markers, "
-            "        :model, :usage, :dur, :status, :raw, :req, :dry, :fname)",
+            "        :model, :usage, :dur, :status, :raw, :req, :dry, :fname, "
+            "        :rating, :desc)",
             {
                 "aid": asset_id, "job_id": job_id, "pv_id": prompt_version_id,
                 "source": source, "tag": tag, "conf": confidence,
@@ -283,5 +431,6 @@ def _write_record(db, asset_id, *, source, tag, confidence, markers, model, usag
                 "req": llm_request,
                 "dry": 1 if dry_run else 0,
                 "fname": filename,
+                "rating": rating, "desc": description,
             },
         )
