@@ -5,11 +5,13 @@
 每条成功执行的步骤都写记录；404（对应关系已被用户手工删除）记 WARN 跳过。
 
 一个 asset 的所有行撤销完后回写 asset_state：
-current_tag / current_markers / visibility 按撤销后的实际状态更新；
-manual_override / reviewed 等人工标记位不动。
+current_tag / current_markers / visibility / rating / description 按撤销后的
+实际状态更新；manual_override / reviewed 等人工标记位不动。
 
 逆操作映射：tag_add↔tag_remove, queue_remove↔queue_restore,
-archive↔timeline, album_add↔album_remove。
+archive↔timeline, album_add↔album_remove,
+rating_set↔rating_set, description_set↔description_set
+（后两者的 payload 需对调 old/new，见 _record 的 §6.5 说明）。
 """
 from __future__ import annotations
 
@@ -35,6 +37,8 @@ class UndoSession:
         self._tag: dict[str, str | None] = {}
         self._markers: dict[str, list[str]] = {}
         self._visibility: dict[str, str | None] = {}
+        self._rating: dict[str, int | None] = {}
+        self._description: dict[str, str | None] = {}
 
     # ------------------------------------------------------------ 读取
 
@@ -124,6 +128,17 @@ class UndoSession:
                 self.client.untag_assets(tag_id, [asset_id])
             return True
 
+        if action in ("rating_set", "description_set"):
+            target = payload.get("old")
+            if action == "rating_set":
+                # rating 接受 None（"未评分"），是合法目标值
+                self.client.set_asset_properties([asset_id], rating=target)
+            else:
+                # description 没有 None：清空只能传 ""
+                self.client.set_asset_properties([asset_id],
+                                                 description=target or "")
+            return True
+
         raise ValueError(f"unknown change_log action: {action!r}")
 
     def _tag_id_by_name(self, name: str | None) -> str | None:
@@ -143,12 +158,16 @@ class UndoSession:
             "queue_remove": "queue_restore", "queue_restore": "queue_remove",
             "archive": "timeline", "timeline": "archive",
             "album_add": "album_remove", "album_remove": "album_add",
+            "rating_set": "rating_set", "description_set": "description_set",
         }[action]
         undo_payload = dict(payload)
         if action in _VIS_ACTIONS:
             # 本步把可见性改成了 action 对应的值；撤销恢复为 from_visibility，
             # 因此 undo 记录（逆操作）的"变更前值" = apply 动作的目标值
             undo_payload = {"from_visibility": action}
+        elif action in ("rating_set", "description_set"):
+            # 方向必须对调，否则二次 undo 会反向（§6.5）
+            undo_payload = {"old": payload.get("new"), "new": payload.get("old")}
         with self.db.connect() as conn:
             conn.execute(
                 "INSERT INTO change_log (job_id, asset_id, action, direction, payload) "
@@ -163,7 +182,8 @@ class UndoSession:
         if asset_id not in self._markers:
             with self.db.connect() as conn:
                 r = conn.execute(
-                    "SELECT current_tag, current_markers, visibility "
+                    "SELECT current_tag, current_markers, visibility, "
+                    "       rating, description "
                     "FROM asset_state WHERE asset_id = ?", (asset_id,),
                 ).fetchone()
             self._tag[asset_id] = r["current_tag"] if r else None
@@ -174,6 +194,8 @@ class UndoSession:
             except (TypeError, ValueError):
                 self._markers[asset_id] = []
             self._visibility[asset_id] = r["visibility"] if r else None
+            self._rating[asset_id] = r["rating"] if r else None
+            self._description[asset_id] = r["description"] if r else None
 
         if action in ("tag_add", "tag_remove"):
             name = payload.get("tag_name")
@@ -193,6 +215,12 @@ class UndoSession:
         elif action in _VIS_ACTIONS:
             self._visibility[asset_id] = payload.get("from_visibility")
 
+        elif action == "rating_set":
+            self._rating[asset_id] = payload.get("old")
+
+        elif action == "description_set":
+            self._description[asset_id] = payload.get("old")
+
         # album_add/album_remove/queue_* 不进 asset_state
 
     def flush_state(self) -> None:
@@ -202,15 +230,19 @@ class UndoSession:
             for asset_id, vis in self._visibility.items():
                 conn.execute(
                     "INSERT INTO asset_state (asset_id, current_tag, "
-                    "current_markers, visibility, last_job_id) "
-                    "VALUES (:aid, :tag, :markers, :vis, :job_id) "
+                    "current_markers, visibility, rating, description, last_job_id) "
+                    "VALUES (:aid, :tag, :markers, :vis, :rating, :desc, :job_id) "
                     "ON CONFLICT(asset_id) DO UPDATE SET "
                     "  current_tag = excluded.current_tag, "
                     "  current_markers = excluded.current_markers, "
                     "  visibility = excluded.visibility, "
+                    "  rating = excluded.rating, "
+                    "  description = excluded.description, "
                     "  last_job_id = excluded.last_job_id, "
                     "  updated_at = datetime('now')",
                     {"aid": asset_id, "tag": self._tag[asset_id],
                      "markers": json.dumps(self._markers[asset_id]),
-                     "vis": vis, "job_id": self.undo_job_id},
+                     "vis": vis, "rating": self._rating[asset_id],
+                     "desc": self._description[asset_id],
+                     "job_id": self.undo_job_id},
                 )
