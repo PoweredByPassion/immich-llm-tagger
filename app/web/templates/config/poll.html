@@ -61,13 +61,16 @@
           <p class="text-xs text-[#8a8f98] mt-0.5">{{ tr("config.effects.enabled") }}</p>
         </div>
 
-        <div class="flex flex-wrap gap-x-5 gap-y-2">
-          {% for eff in effect_options %}
-          <label class="flex items-center gap-2 text-xs font-mono text-zinc-200 cursor-pointer select-none">
-            <input type="checkbox" name="enabled_effects" value="{{ eff }}"
-                   {% if eff in enabled_effects %}checked{% endif %}
-                   class="h-4 w-4 rounded-[4px] border-[#20232d] bg-[#090a0f] text-[#5e6ad2] focus:ring-0 focus:ring-offset-0">
-            <span>{{ eff }}</span>
+        <div class="space-y-3">
+          {% for eff in effect_rows %}
+          <label class="flex items-start gap-3 cursor-pointer select-none">
+            <input type="checkbox" name="enabled_effects" value="{{ eff.name }}"
+                   {% if eff.name in enabled_effects %}checked{% endif %}
+                   class="mt-0.5 h-4 w-4 flex-shrink-0 rounded-[4px] border-[#20232d] bg-[#090a0f] text-[#5e6ad2] focus:ring-0 focus:ring-offset-0">
+            <span class="min-w-0">
+              <span class="block text-xs font-mono font-medium text-zinc-200">{{ eff.name }}</span>
+              <span class="block text-xs text-[#8a8f98] mt-0.5">{{ eff.desc }}</span>
+            </span>
           </label>
           {% endfor %}
         </div>

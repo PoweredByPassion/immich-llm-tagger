@@ -215,6 +215,11 @@ _DICTIONARY: dict[str, dict[str, str]] = {
     "config.effects.enabled":      {"zh": "启用的效应器（未勾选的写入被跳过）", "en": "Enabled effectors (unchecked writes are skipped)"},
     "config.effects.skip_marker":  {"zh": "跳过标记标签名（留空则跟随语言）", "en": "Skip-marker tag name (empty follows language)"},
     "config.effects.max_attempts": {"zh": "应用最大重试次数", "en": "Max apply attempts"},
+    "config.effects.desc.tag":         {"zh": "把预测出的主标签与 Marker 标签写回 Immich。", "en": "Write the predicted primary tag and markers back to Immich."},
+    "config.effects.desc.visibility":  {"zh": "把判定为低价值或敏感的图片归档（archive），其余图片恢复时间线显示。", "en": "Archive low-value or sensitive images and restore the rest to the timeline."},
+    "config.effects.desc.album":       {"zh": "把图片加入其标签所配置的相册（标签未配置相册时不写入）。", "en": "Add images to the album configured on their tag (no album configured means no write)."},
+    "config.effects.desc.rating":      {"zh": "写入 1–5 星评分；检测到你手工打的分时不覆盖，只留一条跳过标记。", "en": "Write the 1-5 star rating; manual ratings are kept and only flagged as skipped."},
+    "config.effects.desc.description": {"zh": "写入图片描述；同样不覆盖你手工填写的描述，只留一条跳过标记。", "en": "Write the image description; manual descriptions are likewise kept and only flagged as skipped."},
     "config.effects.max_attempts_invalid": {"zh": "应用最大重试次数必须是不小于 1 的整数", "en": "Max apply attempts must be an integer of at least 1"},
     # --- 配置中心：导入导出 ---
     "config.transfer.title":      {"zh": "导入导出", "en": "Import / Export"},

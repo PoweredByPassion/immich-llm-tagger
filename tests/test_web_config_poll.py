@@ -274,3 +274,26 @@ def test_save_non_integer_max_attempts_rejected(client):
     assert resp.status_code == 200
     assert "不小于 1 的整数" in resp.text
     assert settings.get("apply_max_attempts") == before
+
+
+def test_effector_rows_render_one_per_line_with_description(client):
+    """每个效应器独占一行，并带本地化说明（zh）。"""
+    c, _ = client
+    html = c.get("/config/poll").text
+    for name, desc in (
+        ("tag", "把预测出的主标签与 Marker 标签写回 Immich。"),
+        ("visibility", "把判定为低价值或敏感的图片归档"),
+        ("album", "把图片加入其标签所配置的相册"),
+        ("rating", "写入 1–5 星评分"),
+        ("description", "写入图片描述"),
+    ):
+        assert f'value="{name}"' in html
+        assert desc in html
+
+
+def test_effector_descriptions_localized_english(client):
+    """效应器说明走 i18n，en 下不残留中文。"""
+    c, _ = client
+    html = c.get("/config/poll", cookies={"lang": "en"}).text
+    assert "Write the predicted primary tag and markers back to Immich." in html
+    assert "把预测出的主标签" not in html

@@ -20,6 +20,16 @@ MIN_INTERVAL_SECONDS = 10
 EFFECT_OPTIONS = ("tag", "visibility", "album", "rating", "description")
 
 
+def _effect_rows(lang: str) -> list[dict]:
+    """效应器行：值（提交给表单的 code）+ 本地化说明。
+
+    描述用变量拼 key（`config.effects.desc.<code>`）取词条，模板里不写死
+    字面量 key —— 否则 i18n 扫描器会把模板里的前缀当成一个不存在的 key。
+    """
+    return [{"name": name, "desc": t(f"config.effects.desc.{name}", lang)}
+            for name in EFFECT_OPTIONS]
+
+
 def _store(request: Request) -> SettingsStore:
     return SettingsStore(request.app.state.db)
 
@@ -32,7 +42,7 @@ def _render(request: Request, settings: SettingsStore, **extra):
         "enabled_effects": settings.get("enabled_effects"),
         "skip_marker_tag_name": settings.get("skip_marker_tag_name") or "",
         "apply_max_attempts": settings.get("apply_max_attempts"),
-        "effect_options": EFFECT_OPTIONS,
+        "effect_rows": _effect_rows(lang_from_cookie(request.cookies)),
         **extra,
     }
     return request.app.state.templates.TemplateResponse(
