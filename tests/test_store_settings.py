@@ -154,3 +154,40 @@ def test_enabled_effects_roundtrip_is_json(tmp_path: Path):
     s = SettingsStore(d)
     s.set("enabled_effects", ["tag", "rating"])
     assert s.get("enabled_effects") == ["tag", "rating"]
+
+
+def test_get_enabled_effects_returns_defensive_copy(tmp_path: Path):
+    """get() 必须返回可变默认值的副本，别把模块级 DEFAULTS 交出去。
+
+    enabled_effects 是 DEFAULTS 里第一个可变容器默认值：若直接返回共享的
+    list 对象，调用方一次 in-place 修改（remove/append）就会永久污染整个
+    进程的 DEFAULTS —— 之后所有实例都读到被改过的默认值。
+    """
+    from app.db.connection import Database
+    from app.db.migrate import migrate
+    from app.store.settings import DEFAULTS, SettingsStore
+
+    d = Database(tmp_path / "t.db"); migrate(d)
+    s = SettingsStore(d)
+    got = s.get("enabled_effects")
+    got.remove("rating")
+    assert DEFAULTS["enabled_effects"] == [
+        "tag", "visibility", "album", "rating", "description"]
+    assert s.get("enabled_effects") == [
+        "tag", "visibility", "album", "rating", "description"]
+
+
+def test_get_all_returns_defensive_copy(tmp_path: Path):
+    """get_all() 合并视图里的可变默认值同样必须是副本。"""
+    from app.db.connection import Database
+    from app.db.migrate import migrate
+    from app.store.settings import DEFAULTS, SettingsStore
+
+    d = Database(tmp_path / "t.db"); migrate(d)
+    s = SettingsStore(d)
+    merged = s.get_all()
+    merged["enabled_effects"].append("x")
+    assert DEFAULTS["enabled_effects"] == [
+        "tag", "visibility", "album", "rating", "description"]
+    assert s.get_all()["enabled_effects"] == [
+        "tag", "visibility", "album", "rating", "description"]

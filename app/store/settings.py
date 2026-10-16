@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import copy
 import json
 import secrets
 from typing import Any
@@ -51,10 +52,10 @@ class SettingsStore:
         if key not in DEFAULTS:
             raise KeyError(key)
         stored = self._raw()
-        return stored.get(key, DEFAULTS[key])
+        return copy.deepcopy(stored.get(key, DEFAULTS[key]))
 
     def get_all(self) -> dict[str, Any]:
-        return {**DEFAULTS, **self._raw()}
+        return copy.deepcopy({**DEFAULTS, **self._raw()})
 
     def set(self, key: str, value: Any) -> None:
         if key not in DEFAULTS:
