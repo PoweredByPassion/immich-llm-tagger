@@ -405,11 +405,6 @@ def _primary_names(cfg: PipelineConfig) -> list[tuple[str, str]]:
             if t.kind == "primary" and t.enabled]
 
 
-def _is_refusal(text: str) -> bool:
-    from app.classify.parse import is_refusal
-    return is_refusal(text)
-
-
 def _ms(started: float) -> int:
     return int((time.monotonic() - started) * 1000)
 

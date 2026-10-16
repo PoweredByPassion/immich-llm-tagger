@@ -79,7 +79,7 @@ def test_gate_manual_override_blocks_metadata():
 
 
 def test_gate_skip_immich_blocks_everything():
-    """skip_immich：连标签都不写（现有 apply_plan 的语义），只有队列收尾动 ——
+    """skip_immich：连标签都不写（沿用旧 apply 路径的语义），只有队列收尾动 ——
     而队列收尾由提交器的 Finalizer 负责，不在 Effect 列表里。"""
     effects, _ = _plan(_ctx(gates=Gates(skip_immich=True)))
     assert effects == []
@@ -98,7 +98,7 @@ def test_description_skipped_when_user_wrote_it():
 
 
 # ---------------------------------------------------- visibility planner
-# 语义源自 tests/test_classify_apply.py（Task 9 随 apply_plan 一起删除）：
+# 语义沿用已删除的 tests/test_classify_apply.py：
 #   · archive=True 且非 archive → archive（from=当前值）
 #   · archive=False 且 has_system_archive 且非 timeline → timeline（from=当前值）
 #   · 已是目标可见性 / 无本系统归档史 → 不产出（用户自行归档不被还原）

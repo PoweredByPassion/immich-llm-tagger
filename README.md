@@ -41,7 +41,8 @@ When backing up photos from smartphones (e.g. via iCloud sync, Google Photos, or
   - **Polling Fallback**: Configurable periodic scanning to ensure zero missed assets.
 - 🔒 **Concurrency & Lease Lock**: Atomic lease claims in SQLite ensure no duplicate processing even with concurrent workers.
 - ↩️ **One-Click Undo & Reversible Operations**: Full audit logging (`change_log`) allows rolling back any job at any time.
-- 🛡️ **Non-destructive & Scoped Safety**: The Danger Zone reset only untags assets this system has tagged and unarchives photos archived by the system—tag objects and your manually curated tags on other photos remain completely untouched.
+- ⭐ **Ratings & Descriptions**: Let the vision model also fill in Immich's own star rating and description, with a per-field guard that never overwrites something you wrote yourself.
+- 🛡️ **Non-destructive & Scoped Safety**: The Danger Zone resets only the dimensions you check (tags / classification / rating / description) and only touches assets this system has handled—tag objects and your manually curated tags on other photos remain completely untouched.
 - 🎨 **Linear Dark Management UI**: Built with FastAPI, Tailwind CSS, Alpine.js, and HTMX. Features real-time SSE progress updates, asset cards, and visual rule editors.
 
 ---
@@ -161,12 +162,43 @@ If you prefer manual control or want to organize your existing historical photos
 
 ---
 
+## ⭐ Rating & Description
+
+Besides tags, the tagger can write Immich's built-in **star rating** (1–5) and **description** onto each asset. The vision model returns both together with the tag, and they are folded together with any visibility change into a **single `PUT /assets` request** — one request, one committed `change_log` entry per field.
+
+Each field is decided independently (a rating and a description on the same asset can take different branches):
+
+| Current value in Immich | What happens |
+| :--- | :--- |
+| empty (never rated / no description) | the model's value is written |
+| equals the value this system wrote last time | kept as-is on a normal re-scan; refreshed only when the apply was explicitly initiated (Reclassify) |
+| written by you | **never overwritten** — the field is skipped and the asset gets the *skip-marker* tag (default `manual-kept`; Chinese default `保留人工信息`), with the skipped field recorded in `change_log` |
+
+An existing `rating = -1` counts as a value (it is not treated as "unrated") — such an asset is left to you.
+
+### `enabled_effects`
+
+Every write target is an independent effector: `tag`, `visibility`, `album`, `rating`, `description`. The list is editable in **Config → Polling → Effectors & Retries** (`enabled_effects`); anything not listed is planned away entirely — no Immich write and no `change_log` entry. Default is all five. To upgrade "silently" (keep tagging, but leave rating/description for you to fill in by hand), remove `rating` / `description` from the list.
+
+The same panel contains:
+
+- **Skip-marker tag name** — the tag applied when a user-authored rating/description was skipped (empty = follow the UI language).
+- **Max apply attempts** — how often a failed apply is retried before the asset is given up on (default `3`). An asset still awaiting a retry shows a *retry* pill in its detail view, and records that never got applied are listed in the job's failure list.
+
+### Danger Zone: per-dimension reset
+
+The Danger Zone resets **four independent dimensions** — tags, classification (unarchive + remove from albums), rating, description. Each checkbox shows the *estimated* number of affected assets, computed from the local database. **Only the checked dimensions are touched**; an unchecked dimension is left exactly as it is, local mirror columns included.
+
+For rating/description the reset has a safety valve: a field is restored to the value that existed before this system first wrote it — and only if Immich's *current* value still equals what the system last wrote. If you edited it yourself since, the reset leaves it alone (an originally empty description is restored as `""`). Reset still requires typing `RESET` twice and is refused while any job is active.
+
+---
+
 ## 🛠️ Advanced Operations
 
 - **Single Asset Processing & Sandbox**: Test LLM prompt results on any single `assetId` in real-time without writing changes to Immich.
-- **Reclassify (重新分类)**: If you update your prompt or category rules, easily trigger a reclassify on specific assets. The system strips previous managed tags and re-evaluates the asset.
+- **Reclassify (重新分类)**: If you update your prompt or category rules, easily trigger a reclassify on specific assets. The system strips previous managed tags and re-evaluates the asset — this is also the one path that refreshes a rating/description it wrote itself.
 - **Task Rollback (Undo)**: In the **Jobs** tab, click **Undo** on any finished job to reverse the tag additions, album attachments, and visibility changes made during that run. (Undoing a Danger Zone reset restores tags on system-managed assets; visibility stays unarchived.)
-- **Danger Zone Reset (安全重置)**: Untag all assets previously tagged by the system and reset photos archived by it back to the timeline, without deleting tag objects or touching user-curated tags.
+- **Danger Zone Reset (安全重置)**: Pick one or more dimensions (tags / classification / rating / description) and reset only those — see **Rating & Description** above for the rating/description safety valve. Tag objects are never deleted and user-curated tags on other photos are never touched.
 
 ---
 

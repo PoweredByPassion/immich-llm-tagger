@@ -434,7 +434,7 @@ def test_bumped_apply_attempts_keeps_existing_state(db: Database) -> None:
 
 
 # ---------- has_system_archive ----------
-# 语义源自 tests/test_classify_apply.py（Task 9 随 apply_plan 一起删除）：
+# 语义沿用已删除的 tests/test_classify_apply.py：
 #   「本系统归档过」= action='archive' AND direction='apply'。
 
 def test_has_system_archive_true_for_apply_row(db: Database) -> None:

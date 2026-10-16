@@ -3,7 +3,7 @@
 语义（设计 §5.8）：摘"本系统管理的标签"∩ 实际拥有 → change_log(tag_remove,
 job_id=本 job) → 清空 current_tag/current_markers、更新 last_job_id →
 classify_asset(source="manual") 重跑；重分类显式发起不受 manual_override
-限制（§5.5），apply_plan 的 manual_override=False。
+限制（§5.5），重跑走 override_manual=False。
 """
 from __future__ import annotations
 

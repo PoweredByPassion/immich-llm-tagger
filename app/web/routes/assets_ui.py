@@ -1,11 +1,11 @@
 """图片记录页：列表（筛选 + 分页）、详情（快照 + 历史 + 原始返回）、
 从 Immich 同步 asset_state。
 
-同步的标签口径与 app/classify/apply.py 写回逻辑对齐：current_tag 取
+同步的标签口径与提交器（app/classify/commit.py）的写回逻辑对齐：current_tag 取
 Immich 资产上命中的本地 tags 表 primary 标签，current_markers 取命中的
 marker 标签（两者都只认本地 tags 表里登记过的名字，Immich 上的其他标签
 不进本地快照）；visibility 直接采用 Immich 返回的 visibility 值
-（"timeline"/"archive"/…，与 apply.py 的 set_visibility 取值同一来源）。
+（"timeline"/"archive"/…，与提交器 set_visibility 取值同一来源）。
 所有失败路径渲染错误横幅，绝不 500。
 """
 from __future__ import annotations

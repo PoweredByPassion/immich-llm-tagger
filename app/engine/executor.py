@@ -56,8 +56,6 @@ DEFAULT_PROMPT_TEMPLATE = (
     "content is sensitive, refuse."
 )
 
-_UNKNOWN_TYPES = ("backfill", "undo", "reset", "reclassify")
-
 # scan 拆分后的协调器：轮询子任务直到全部终态，再收尾父 scan。不占用 worker
 # 池线程（spec：分类并发 = worker 数）。
 SCAN_COORD_POLL_SECONDS = 0.5
