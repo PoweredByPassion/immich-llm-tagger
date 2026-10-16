@@ -1068,6 +1068,38 @@ def test_retry_reuses_stored_analysis_without_llm(db: Database) -> None:
     assert len(rows) == 1 and rows[0]["applied_at"] is not None   # §6.5：不新增行，只盖章
 
 
+def test_successful_apply_clears_apply_attempts(db: Database) -> None:
+    """成功应用必须把 asset_state.apply_attempts 归零。
+
+    计数器语义 = **连续失败次数**，只在 reclassify / 维度重置里被清过、
+    从不在成功时清 —— 于是「失败一次 → 下轮复用分析后应用成功」的资产会
+    永远停在 apply_attempts=1，详情页的黄色「待重试 (1/3)」胶囊变成永久假
+    阳性（而任务详情页的失败清单按 applied_at 已不再列它，两个界面互相矛盾）。
+    """
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO asset_state (asset_id, apply_attempts) "
+            "VALUES ('asset-1', 2)")
+        # 可复用的待应用记录（status='ok'、dry_run=0、applied_at IS NULL）
+        conn.execute(
+            "INSERT INTO asset_records (asset_id, source, status, dry_run, "
+            "  predicted_tag, confidence, markers, rating, description, filename) "
+            "VALUES ('asset-1','poll','ok',0,'cat',0.9,'[]',4,'一只猫','IMG_0001.png')")
+    client = FakeClient()
+
+    classify_asset(db, client, FakeLLM([RATING_JSON]), "asset-1", make_cfg(),
+                   source="poll", job_id=2)
+
+    with db.connect() as conn:
+        assert conn.execute(
+            "SELECT apply_attempts FROM asset_state WHERE asset_id='asset-1'"
+        ).fetchone()["apply_attempts"] == 0
+        # 成功盖章照旧：修的是计数器，不是 applied_at
+        assert conn.execute(
+            "SELECT applied_at FROM asset_records WHERE asset_id='asset-1'"
+        ).fetchone()["applied_at"] is not None
+
+
 def test_reuse_does_not_take_refused_or_applied_records(db: Database) -> None:
     """status='refused' 不是可复用对象。
 

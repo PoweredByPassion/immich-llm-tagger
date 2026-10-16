@@ -314,10 +314,17 @@ def _snapshot(client, asset_id: str, asset_hint: dict | None) -> AssetSnapshot:
 
 
 def _mark_applied(db, asset_id: str) -> None:
-    """成功闸门通过：给**最新那条** dry_run=0 的记录补 applied_at（§7.1）。
+    """成功闸门通过：给**最新那条** dry_run=0 的记录补 applied_at（§7.1），
+    并把 asset_state.apply_attempts 归零。
 
     口径必须与 `_already_done` 一致（同样取最新一条），否则重试场景会给
     旧记录盖章、新记录仍无凭据 —— 而 _already_done 看的正是新记录。
+
+    apply_attempts 的语义是**连续失败次数**（§7.3）：只在失败时自增
+    （`_apply_failed` / `bumped_apply_attempts`），成功时必须清零，否则
+    「失败一次 → 下轮复用分析后应用成功」的资产会永远停在 1，详情页的
+    「待重试 (1/3)」胶囊成为永久假阳性（与按 applied_at 判定的失败清单矛盾）。
+    只在成功路径调用本函数，失败路径不经过这里。
     """
     with db.connect() as conn:
         conn.execute(
@@ -325,6 +332,10 @@ def _mark_applied(db, asset_id: str) -> None:
             " WHERE id = (SELECT id FROM asset_records "
             "              WHERE asset_id = ? AND dry_run = 0 "
             "              ORDER BY created_at DESC, id DESC LIMIT 1)",
+            (asset_id,),
+        )
+        conn.execute(
+            "UPDATE asset_state SET apply_attempts = 0 WHERE asset_id = ?",
             (asset_id,),
         )
 
