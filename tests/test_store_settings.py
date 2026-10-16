@@ -40,7 +40,7 @@ def test_defaults_table_is_complete() -> None:
         "default_min_confidence": 0.8,
         "fallback_tag_name": "other",
         "thumb_preset": "large",
-        "thumb_quality": 85,
+        "thumb_quality": 95,
         "record_retention_days": 90,
         "active_prompt_version_id": None,
         "enabled_effects": ["tag", "visibility", "album", "rating", "description"],

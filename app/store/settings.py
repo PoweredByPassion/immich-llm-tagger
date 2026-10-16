@@ -21,7 +21,7 @@ DEFAULTS: dict[str, Any] = {
     "default_min_confidence": 0.8,
     "fallback_tag_name": "other",
     "thumb_preset": "large",
-    "thumb_quality": 85,
+    "thumb_quality": 95,
     "record_retention_days": 90,
     "last_retention_run": None,     # epoch 秒（float），retention 24h 自管理时间戳
     "active_prompt_version_id": None,
