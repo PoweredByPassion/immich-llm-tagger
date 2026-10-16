@@ -949,6 +949,26 @@ def test_pipeline_writes_rating_and_description(db: Database) -> None:
     assert (row["rating"], row["description"]) == (4, "一只猫")
 
 
+def test_pipeline_honors_per_tag_write_flags(db: Database) -> None:
+    """标签关掉「写评分/写描述」→ 这两个字段一次都不发往 Immich（v12）。
+
+    同时钉住：没打算写 ≠ 被用户的值挡住 —— 不能因此打「保留人工信息」。
+    """
+    client = FakeClient()
+    client.user_rating = 5                     # 用户写过评分，但本标签根本不写
+    cfg = make_cfg(tags=[StoreTagDef(
+        id=1, name="cat", description="a cat", kind="primary", enabled=True,
+        archive=False, album=None, min_confidence=None,
+        write_rating=False, write_description=False,
+    )])
+    result = classify_asset(db, client, FakeLLM([RATING_JSON]), "asset-1",
+                           cfg, source="poll")
+    assert result.status == "ok"
+    assert client.set_props_calls == []
+    assert "cat" in client.tagged_names
+    assert "保留人工信息" not in client.tagged_names
+
+
 def test_pipeline_records_analysis_output_in_records(db: Database) -> None:
     """§7.3 复用重试的前提：记录里必须存得住全部判定。"""
     classify_asset(db, FakeClient(), FakeLLM([RATING_JSON]), "asset-1",

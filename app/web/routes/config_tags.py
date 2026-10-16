@@ -41,6 +41,19 @@ def _optional_float(form, name: str) -> float | None:
         raise ValidationError([Problem("config.tags.name_is_number", (name, repr(raw)))]) from None
 
 
+def _write_flag(form, name: str) -> bool:
+    """write_rating / write_description（默认勾选 = 默认写）的解析。
+
+    复选框未勾选时浏览器不发送该键，所以"键缺失"有两种来源，必须区分：
+      · 新表单带着隐藏位 write_flags → 缺键 = 用户主动取消勾选 → False；
+      · 老表单（旧 HTML 的长开标签页）/ 程序化提交 → 无隐藏位 → 保持默认 True，
+        绝不能因为提交没带这两个键就把"写评分/描述"静默关掉。
+    """
+    if form.get("write_flags") is None:
+        return True
+    return form.get(name) is not None
+
+
 def _render_tags(request: Request, *, error: str | None = None,
                  saved: bool = False, saved_msg: str | None = None):
     return _templates(request).TemplateResponse(
@@ -79,6 +92,8 @@ async def tag_create(request: Request):
             album=_optional_str(form, "album"),
             min_confidence=_optional_float(form, "min_confidence"),
             skip_immich=form.get("skip_immich") is not None,
+            write_rating=_write_flag(form, "write_rating"),
+            write_description=_write_flag(form, "write_description"),
         )
     except ValidationError as exc:
         return _render_tags(request, error=render_problems(exc.problems, lang))
@@ -102,6 +117,8 @@ async def tag_update(request: Request, tag_id: int):
             min_confidence=_optional_float(form, "min_confidence"),
             enabled=form.get("enabled") is not None,
             skip_immich=form.get("skip_immich") is not None,
+            write_rating=_write_flag(form, "write_rating"),
+            write_description=_write_flag(form, "write_description"),
         )
     except ValidationError as exc:
         return _render_tags(request, error=render_problems(exc.problems, lang))

@@ -1573,9 +1573,11 @@ def test_pipeline_config_carries_effect_settings(db: Database) -> None:
 
 
 def test_pipeline_config_effect_defaults(db: Database) -> None:
-    """未配置时的兜底：全开 + 上限 3 + 按 zh 解析标记名。"""
+    """未配置时的兜底：全局效应器三个全开 + 上限 3 + 按 zh 解析标记名。
+
+    评分/描述不在 enabled_effects 里 —— 它们按标签控制（v12）。
+    """
     cfg = build_pipeline_config(db)
-    assert cfg.enabled_effects == {"tag", "visibility", "album",
-                                   "rating", "description"}
+    assert cfg.enabled_effects == {"tag", "visibility", "album"}
     assert cfg.apply_max_attempts == 3
     assert cfg.skip_marker_tag_name == "保留人工信息"

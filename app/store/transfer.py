@@ -37,7 +37,8 @@ def export_config(db: Database) -> dict[str, Any]:
     with db.connect() as conn:
         tags = [dict(r) for r in conn.execute(
             "SELECT name, description, kind, archive, album, min_confidence, "
-            "       enabled, skip_immich FROM tags ORDER BY id").fetchall()]
+            "       enabled, skip_immich, write_rating, write_description "
+            "  FROM tags ORDER BY id").fetchall()]
 
         scope = [dict(r) for r in conn.execute(
             "SELECT library_id, path_prefix, enabled FROM scope_rules "
@@ -117,12 +118,16 @@ def import_config(db: Database, data: Any) -> None:
             for r in section("tags"):
                 cur = conn.execute(
                     "INSERT INTO tags (name, description, kind, archive, album, "
-                    "                  min_confidence, enabled, skip_immich) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    "                  min_confidence, enabled, skip_immich, "
+                    "                  write_rating, write_description) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (r["name"], r.get("description", ""), r["kind"],
                      int(r.get("archive", 0)), r.get("album"),
                      r.get("min_confidence"), int(r.get("enabled", 1)),
-                     int(r.get("skip_immich", 0))),
+                     int(r.get("skip_immich", 0)),
+                     # 缺键 = 旧版导出的文件：按默认（写）处理，不静默变成不写
+                     int(r.get("write_rating", 1)),
+                     int(r.get("write_description", 1))),
                 )
                 tag_ids[r["name"]] = cur.lastrowid
 

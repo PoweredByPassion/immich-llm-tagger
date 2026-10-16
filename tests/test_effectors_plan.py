@@ -4,8 +4,18 @@ from app.classify.effectors import plan_all
 from app.classify.effectors.base import EffectContext, Gates, PlanOutcome
 from app.classify.parse import Classification
 from app.classify.snapshot import AssetSnapshot
+from app.store.tags import TagDef as StoreTagDef
 
-ALL = {"tag", "visibility", "album", "rating", "description"}
+# 全局效应器（settings.enabled_effects）：只有这三个。评分/描述按标签开关
+# （tags.write_rating / write_description）控制，不在这个集合里。
+ALL = {"tag", "visibility", "album"}
+
+
+def _tag(**kw):
+    base = dict(id=1, name="cat", description="", kind="primary", enabled=True,
+                archive=False, album=None, min_confidence=None)
+    base.update(kw)
+    return StoreTagDef(**base)
 
 
 def _ctx(**kw):
@@ -66,10 +76,46 @@ def test_explicit_reclassify_refreshes_our_own_value():
     assert _ratings(effects)[0].payload == {"old": 3, "new": 4}
 
 
-def test_disabled_effector_produces_nothing():
-    effects, _ = _plan(_ctx(enabled={"tag"}))
-    assert not [e for e in effects if e.action.startswith("rating")]
-    assert not [e for e in effects if e.action.startswith("description")]
+def test_per_tag_switch_blocks_rating_and_description():
+    """标签声明不写评分/描述 → 两个 effect 都不产出，但标签照常写。
+
+    这是 v12 的语义：评分/描述由标签维度控制，不再看 enabled_effects。
+    """
+    effects, _ = _plan(_ctx(tag_def=_tag(write_rating=False,
+                                         write_description=False)))
+    assert _ratings(effects) == []
+    assert not [e for e in effects if e.action == "description_set"]
+    assert [e.action for e in effects if e.action == "tag_add"] == ["tag_add"]
+
+
+def test_per_tag_switch_does_not_add_skip_marker():
+    """不写评分 ≠ 跳过评分：用户写过值也不该被记成 skipped（那会打「保留人工信息」）。
+
+    跳过标记的语义是"我们想写但被你写的值挡住"，这里是"压根没打算写"。
+    """
+    effects, outcome = _plan(_ctx(
+        tag_def=_tag(write_rating=False, write_description=False),
+        snapshot=AssetSnapshot(rating=5, description="我写的")))
+    assert _ratings(effects) == []
+    assert outcome.skipped == []
+
+
+def test_tag_switches_are_independent():
+    """两个开关互相独立：关评分不影响描述，反之亦然。"""
+    effects, _ = _plan(_ctx(tag_def=_tag(write_rating=False)))
+    assert _ratings(effects) == []
+    assert len([e for e in effects if e.action == "description_set"]) == 1
+
+    effects, _ = _plan(_ctx(tag_def=_tag(write_description=False)))
+    assert len(_ratings(effects)) == 1
+    assert not [e for e in effects if e.action == "description_set"]
+
+
+def test_no_tag_def_keeps_writing_metadata():
+    """模型给的 tag 没匹配上任何标签（tag_def=None）→ 无可读开关，照常写。"""
+    effects, _ = _plan(_ctx(tag_def=None))
+    assert len(_ratings(effects)) == 1
+    assert len([e for e in effects if e.action == "description_set"]) == 1
 
 
 def test_gate_manual_override_blocks_metadata():

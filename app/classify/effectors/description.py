@@ -1,11 +1,12 @@
-"""描述 effector：与 rating 同构，独立判定。"""
+"""描述 effector：与 rating 同构（标签开关 write_description），独立判定。"""
 from __future__ import annotations
 
-from app.classify.effectors.base import Effect, EffectContext, PlanOutcome
+from app.classify.effectors.base import Effect, EffectContext, PlanOutcome, tag_writes
 
 
 def plan(ctx: EffectContext, last_written: dict, outcome: PlanOutcome) -> list[Effect]:
-    if "description" not in ctx.enabled or ctx.gates.metadata_blocked:
+    # 同 rating：标签不写描述时直接返回，不记 outcome.skipped。
+    if ctx.gates.metadata_blocked or not tag_writes(ctx, "write_description"):
         return []
     new = ctx.analysis.description
     if new is None:

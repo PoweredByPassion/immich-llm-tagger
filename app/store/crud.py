@@ -60,17 +60,19 @@ def set_scope_rule_enabled(db: Database, rule_id: int, enabled: bool) -> None:
 def insert_tag(db: Database, *, name: str, kind: str, description: str = "",
                archive: bool = False, album: str | None = None,
                min_confidence: float | None = None,
-               skip_immich: bool = False) -> int:
+               skip_immich: bool = False,
+               write_rating: bool = True, write_description: bool = True) -> int:
     if kind not in _KINDS:
         raise ValidationError([Problem("store.tag.kind_invalid", (repr(kind),))])
     try:
         with db.connect() as conn:
             cur = conn.execute(
                 "INSERT INTO tags (name, description, kind, archive, album, "
-                "                  min_confidence, enabled, skip_immich) "
-                "VALUES (?, ?, ?, ?, ?, ?, 1, ?)",
+                "                  min_confidence, enabled, skip_immich, "
+                "                  write_rating, write_description) "
+                "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
                 (name, description, kind, int(archive), album, min_confidence,
-                 int(skip_immich)),
+                 int(skip_immich), int(write_rating), int(write_description)),
             )
     except sqlite3.IntegrityError:
         raise ValidationError([Problem("store.tag.exists", (name,))]) from None
@@ -80,7 +82,8 @@ def insert_tag(db: Database, *, name: str, kind: str, description: str = "",
 def update_tag(db: Database, tag_id: int, *, name: str, kind: str,
                description: str, archive: bool, album: str | None,
                min_confidence: float | None, enabled: bool,
-               skip_immich: bool = False) -> None:
+               skip_immich: bool = False,
+               write_rating: bool = True, write_description: bool = True) -> None:
     if kind not in _KINDS:
         raise ValidationError([Problem("store.tag.kind_invalid", (repr(kind),))])
     try:
@@ -88,10 +91,12 @@ def update_tag(db: Database, tag_id: int, *, name: str, kind: str,
             conn.execute(
                 "UPDATE tags SET name = ?, description = ?, kind = ?, "
                 "                archive = ?, album = ?, min_confidence = ?, "
-                "                enabled = ?, skip_immich = ? "
+                "                enabled = ?, skip_immich = ?, "
+                "                write_rating = ?, write_description = ? "
                 "WHERE id = ?",
                 (name, description, kind, int(archive), album, min_confidence,
-                 int(enabled), int(skip_immich), tag_id),
+                 int(enabled), int(skip_immich), int(write_rating),
+                 int(write_description), tag_id),
             )
     except sqlite3.IntegrityError:
         raise ValidationError([Problem("store.tag.exists", (name,))]) from None

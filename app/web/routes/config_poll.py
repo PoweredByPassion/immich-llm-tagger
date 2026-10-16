@@ -17,7 +17,9 @@ router = APIRouter(prefix="/config")
 
 MIN_INTERVAL_SECONDS = 10
 # 与 SettingsStore.DEFAULTS["enabled_effects"] 的取值/顺序一致（无导出的常量源）。
-EFFECT_OPTIONS = ("tag", "visibility", "album", "rating", "description")
+# 只有全局效应器：评分/描述按标签开关（tags.write_rating / write_description），
+# 在「标签体系」页逐个标签控制，不在这里。
+EFFECT_OPTIONS = ("tag", "visibility", "album")
 
 
 def _effect_rows(lang: str) -> list[dict]:

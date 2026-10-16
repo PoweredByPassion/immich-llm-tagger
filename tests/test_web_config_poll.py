@@ -204,14 +204,22 @@ def test_unauthorized_webhook_first_visit_hint(client):
 # ------------------------------------------------------------ §8.1 效应器控件
 
 def test_page_renders_effector_controls(client):
-    """poll 页并入 §8.1 三控件（不新开配置页）；默认全开 5 个 checkbox 都勾选。"""
+    """poll 页并入 §8.1 三控件（不新开配置页）；默认全开 3 个 checkbox 都勾选。
+
+    只有全局效应器：评分/描述按标签控制（tags.write_rating /
+    write_description），页面改为指向「标签体系」的说明文字。
+    """
     import re
     c, settings = client
     html = c.get("/config/poll").text
-    for eff in ("tag", "visibility", "album", "rating", "description"):
+    for eff in ("tag", "visibility", "album"):
         assert re.search(
             r'name="enabled_effects" value="%s"[^>]*checked' % eff, html, re.S
         ), eff
+    # 下放的 rating/description 不能再出现在全局复选组里（关掉也不生效）
+    assert 'name="enabled_effects" value="rating"' not in html
+    assert 'name="enabled_effects" value="description"' not in html
+    assert "标签体系" in html      # 指向逐标签开关的说明
     assert 'name="skip_marker_tag_name"' in html
     assert 'name="apply_max_attempts"' in html
     # 未显式配置时跳过标记标签名渲染为空串（None 不能渲染成字面 "None"）
@@ -277,15 +285,13 @@ def test_save_non_integer_max_attempts_rejected(client):
 
 
 def test_effector_rows_render_one_per_line_with_description(client):
-    """每个效应器独占一行，并带本地化说明（zh）。"""
+    """每个全局效应器独占一行，并带本地化说明（zh）。"""
     c, _ = client
     html = c.get("/config/poll").text
     for name, desc in (
         ("tag", "把预测出的主标签与 Marker 标签写回 Immich。"),
         ("visibility", "把判定为低价值或敏感的图片归档"),
         ("album", "把图片加入其标签所配置的相册"),
-        ("rating", "写入 1–5 星评分"),
-        ("description", "写入图片描述"),
     ):
         assert f'value="{name}"' in html
         assert desc in html

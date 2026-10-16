@@ -43,7 +43,7 @@ def test_defaults_table_is_complete() -> None:
         "thumb_quality": 95,
         "record_retention_days": 90,
         "active_prompt_version_id": None,
-        "enabled_effects": ["tag", "visibility", "album", "rating", "description"],
+        "enabled_effects": ["tag", "visibility", "album"],
         "skip_marker_tag_name": None,
         "apply_max_attempts": 3,
     }
@@ -124,8 +124,9 @@ def test_new_effector_settings_have_defaults(tmp_path: Path):
 
     d = Database(tmp_path / "t.db"); migrate(d)
     s = SettingsStore(d)
-    assert s.get("enabled_effects") == [
-        "tag", "visibility", "album", "rating", "description"]
+    # 只有全局效应器：评分/描述已下放到 tags.write_rating / write_description
+    # （v12），留在这里的名字不生效，会让人误以为关掉就能停写。
+    assert s.get("enabled_effects") == ["tag", "visibility", "album"]
     assert s.get("apply_max_attempts") == 3
     # 默认 None = 「未显式配置」→ 由调用方按语言解析（§8.1 的
     # 「保留人工信息 / manual-kept」）。见下方 resolve_skip_marker_tag_name。
@@ -170,11 +171,9 @@ def test_get_enabled_effects_returns_defensive_copy(tmp_path: Path):
     d = Database(tmp_path / "t.db"); migrate(d)
     s = SettingsStore(d)
     got = s.get("enabled_effects")
-    got.remove("rating")
-    assert DEFAULTS["enabled_effects"] == [
-        "tag", "visibility", "album", "rating", "description"]
-    assert s.get("enabled_effects") == [
-        "tag", "visibility", "album", "rating", "description"]
+    got.remove("tag")
+    assert DEFAULTS["enabled_effects"] == ["tag", "visibility", "album"]
+    assert s.get("enabled_effects") == ["tag", "visibility", "album"]
 
 
 def test_get_all_returns_defensive_copy(tmp_path: Path):
@@ -187,7 +186,5 @@ def test_get_all_returns_defensive_copy(tmp_path: Path):
     s = SettingsStore(d)
     merged = s.get_all()
     merged["enabled_effects"].append("x")
-    assert DEFAULTS["enabled_effects"] == [
-        "tag", "visibility", "album", "rating", "description"]
-    assert s.get_all()["enabled_effects"] == [
-        "tag", "visibility", "album", "rating", "description"]
+    assert DEFAULTS["enabled_effects"] == ["tag", "visibility", "album"]
+    assert s.get_all()["enabled_effects"] == ["tag", "visibility", "album"]

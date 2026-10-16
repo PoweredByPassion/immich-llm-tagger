@@ -12,7 +12,7 @@ def test_migrate_creates_schema_version_table(tmp_path: Path) -> None:
     migrate(db)
     with db.connect() as conn:
         rows = conn.execute("SELECT version FROM schema_version ORDER BY version").fetchall()
-    assert [r["version"] for r in rows] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    assert [r["version"] for r in rows] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
 
 
 def test_migrate_creates_all_config_tables(tmp_path: Path) -> None:
@@ -47,7 +47,7 @@ def test_migrate_is_idempotent(tmp_path: Path) -> None:
     migrate(db)
     with db.connect() as conn:
         count = conn.execute("SELECT COUNT(*) AS c FROM schema_version").fetchone()["c"]
-    assert count == 11
+    assert count == 12
 
 
 def test_current_version_zero_when_fresh(tmp_path: Path) -> None:
@@ -339,7 +339,7 @@ def test_v9_rebuild_preserves_rows_and_columns(tmp_path: Path) -> None:
         conn.execute("INSERT INTO jobs (type, status) VALUES ('single','queued')")
         conn.execute("DELETE FROM jobs WHERE id = 2")   # 制造 id 空洞
 
-    assert migrate(db) == 11
+    assert migrate(db) == 12
 
     with db.connect() as conn:
         row = conn.execute("SELECT * FROM jobs WHERE id = 1").fetchone()
@@ -366,7 +366,7 @@ def test_v9_preserves_autoincrement_counter_when_jobs_empty(tmp_path: Path) -> N
             conn.execute("INSERT INTO jobs (type, status) VALUES ('scan','done')")
         conn.execute("DELETE FROM jobs")              # 计数器停在 3，表为空
 
-    assert migrate(db) == 11
+    assert migrate(db) == 12
 
     with db.connect() as conn:
         assert conn.execute("SELECT COUNT(*) AS n FROM jobs").fetchone()["n"] == 0
@@ -381,7 +381,7 @@ def test_v10_drops_llm_concurrency_column(tmp_path: Path) -> None:
     fresh 库会先经 v1 建出该列、再被 v10 DROP，等价于升级已有库的路径。
     """
     db = Database(tmp_path / "t.db")
-    assert migrate(db) == 11
+    assert migrate(db) == 12
     with db.connect() as conn:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(llm_conn)")}
     assert "concurrency" not in cols
@@ -413,7 +413,7 @@ def _seed_v10_db(tmp_path: Path) -> Database:
 
 def test_v11_adds_columns_and_widens_change_log(tmp_path: Path) -> None:
     db = Database(tmp_path / "t.db")
-    assert migrate(db) == 11
+    assert migrate(db) == 12
     with db.connect() as conn:
         cols_r = {r["name"] for r in conn.execute("PRAGMA table_info(asset_records)")}
         cols_s = {r["name"] for r in conn.execute("PRAGMA table_info(asset_state)")}
@@ -437,7 +437,7 @@ def test_v11_backfills_applied_at_only_for_applied_rows(tmp_path: Path) -> None:
             "       ('err','poll','error',0,'2026-01-01 00:00:00')"
         )
 
-    assert migrate(db) == 11
+    assert migrate(db) == 12
 
     with db.connect() as conn:
         got = {r["asset_id"]: r["applied_at"] for r in conn.execute(
@@ -459,13 +459,56 @@ def test_v11_change_log_rebuild_keeps_autoincrement(tmp_path: Path) -> None:
                          "VALUES ('a1','tag_add','apply','{}')")
         conn.execute("DELETE FROM change_log")        # 表空，seq 停在 2
 
-    assert migrate(db) == 11
+    assert migrate(db) == 12
 
     with db.connect() as conn:
         conn.execute("INSERT INTO change_log (asset_id, action, direction, payload) "
                      "VALUES ('a2','rating_set','apply','{}')")
         assert conn.execute(
             "SELECT MAX(id) AS m FROM change_log").fetchone()["m"] == 3
+
+
+def _seed_v11_db(tmp_path: Path) -> Database:
+    """造一个停在 v11 的库（跑 v1..v11 脚本 + 登记版本号），
+    供 v12 的「升级既有库」断言使用。"""
+    db = Database(tmp_path / "v11.db")
+    with db.connect() as conn:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS schema_version ("
+            "    version    INTEGER PRIMARY KEY,"
+            "    applied_at TEXT NOT NULL DEFAULT (datetime('now'))"
+            ")"
+        )
+        for n in range(1, 12):
+            conn.executescript(
+                (MIGRATIONS_DIR / f"v{n}.sql").read_text(encoding="utf-8")
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (?)", (n,)
+            )
+    assert current_version(db) == 11
+    return db
+
+
+def test_v12_adds_write_flags_defaulting_to_on(tmp_path: Path) -> None:
+    """v12 给 tags 加 write_rating / write_description，且已有标签默认「写」。
+
+    DEFAULT 必须是 1：升级后如果变成不写，所有存量标签会静默停写评分/描述。
+    """
+    db = _seed_v11_db(tmp_path)
+    with db.connect() as conn:
+        conn.execute("INSERT INTO tags (name, kind, archive, enabled) "
+                     "VALUES ('截图', 'primary', 1, 1)")
+
+    assert migrate(db) == 12
+
+    with db.connect() as conn:
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(tags)")}
+        row = conn.execute(
+            "SELECT write_rating, write_description FROM tags WHERE name = '截图'"
+        ).fetchone()
+    assert {"write_rating", "write_description"} <= cols
+    assert (row["write_rating"], row["write_description"]) == (1, 1)
 
 
 def test_v11_recreates_change_log_job_index(tmp_path: Path) -> None:

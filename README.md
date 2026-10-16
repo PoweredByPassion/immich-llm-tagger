@@ -41,7 +41,7 @@ When backing up photos from smartphones (e.g. via iCloud sync, Google Photos, or
   - **Polling Fallback**: Configurable periodic scanning to ensure zero missed assets.
 - 🔒 **Concurrency & Lease Lock**: Atomic lease claims in SQLite ensure no duplicate processing even with concurrent workers.
 - ↩️ **One-Click Undo & Reversible Operations**: Full audit logging (`change_log`) allows rolling back any job at any time.
-- ⭐ **Ratings & Descriptions**: Let the vision model also fill in Immich's own star rating and description, with a per-field guard that never overwrites something you wrote yourself.
+- ⭐ **Ratings & Descriptions (switched per tag)**: Let the vision model also fill in Immich's own star rating and description. **Each tag decides whether they are written** (the same model as archive / album / skip), the rating means "how good the photo looks" rather than importance or keepsake value, and a per-field guard never overwrites something you wrote yourself.
 - 🛡️ **Non-destructive & Scoped Safety**: The Danger Zone resets only the dimensions you check (tags / classification / rating / description) and only touches assets this system has handled—tag objects and your manually curated tags on other photos remain completely untouched.
 - 🎨 **Linear Dark Management UI**: Built with FastAPI, Tailwind CSS, Alpine.js, and HTMX. Features real-time SSE progress updates, asset cards, and visual rule editors.
 
@@ -97,7 +97,7 @@ The repository provides two localized rule templates:
 **How to Import**:
 1. In the Web UI, go to **System -> Config Transfer** (`http://localhost:8080/config/transfer`).
 2. Click **Import Config**, select [`autotag-config.en.yaml`](autotag-config.en.yaml) (or [`autotag-config.zh.yaml`](autotag-config.zh.yaml)), and submit.
-3. All tags, album filing rules, archive thresholds, and prompt templates are instantly configured!
+3. All tags (including the **Write rating** / **Write description** switches and the archive/album rules), thresholds, and prompt templates are instantly configured!
 
 ---
 
@@ -161,11 +161,17 @@ If you prefer manual control or want to organize your existing historical photos
 | **`needs_review`** | Marker | Marker Only | — | *`< 0.50`* | Added when confidence is very low, recommending manual review. |
 | **`refused`** | Marker | Marker Only | — | *Automatic* | Added when the model refuses to answer (or returns unparseable output) so no classification was produced — filter on it to review the failures manually. |
 
+> Whether rating/description are written is a per-tag switch too: in the table above, **archived tags default to `write_rating: false`** while still writing the description; every other tag writes both. See "Rating / description: controlled per tag" below.
+
 ---
 
 ## ⭐ Rating & Description
 
-Besides tags, the tagger can write Immich's built-in **star rating** (1–5) and **description** onto each asset. The vision model returns both together with the tag, and they are folded together with any visibility change into a **single `PUT /assets` request** — one request, one committed `change_log` entry per field.
+Besides tags, the tagger can write Immich's built-in **star rating** (1–5) and **description** onto each asset. The vision model returns both together with the tag, and they are folded together with any visibility change into a **single `PUT /assets` request** — one request, one committed `change_log` entry per field. **Whether they are written at all is decided per tag** (next section); the table below describes what happens *after* a tag opts in.
+
+**The rating means "how good the photo looks"** — judged only on composition, exposure, focus sharpness, colour, lighting, subject prominence and tidiness. It is *not* importance, keepsake or emotional value: important people, events or dates never raise the score (the filename and capture date are context only). `confidence` is the opposite — it expresses certainty about the *classification*, not how good the photo is. These rules ship inside the default prompts (`autotag-config.en.yaml` / `.zh.yaml`) and can be edited under **Config → Prompt Versions**.
+
+> **Upgrading**: the shipped prompt now defines `rating` as image quality (it used to mean importance / keepsake value), and the rating/description switches moved from a global setting to the per-tag columns (both default to on). Existing installs get the new prompt by re-importing the YAML or pasting the new body into **Prompt Versions** and activating it; historical ratings keep their old meaning and are never recomputed — to refresh them, run **Reclassify** on the affected assets (the only path that rewrites values this system wrote).
 
 Each field is decided independently (a rating and a description on the same asset can take different branches):
 
@@ -177,9 +183,17 @@ Each field is decided independently (a rating and a description on the same asse
 
 An existing `rating = -1` counts as a value (it is not treated as "unrated") — such an asset is left to you.
 
-### `enabled_effects`
+### Rating / description: controlled per tag
 
-Every write target is an independent effector: `tag`, `visibility`, `album`, `rating`, `description`. The list is editable in **Config → Recognition Settings → Effectors & Retries** (`enabled_effects`); anything not listed is planned away entirely — no Immich write and no `change_log` entry. Default is all five. To upgrade "silently" (keep tagging, but leave rating/description for you to fill in by hand), remove `rating` / `description` from the list.
+**Whether rating and description are written is decided by the tag system** — the same model as *archive* (`archive`), *album* (`album`) and *skip Immich* (`skip_immich`). In **Config → Tags**, every tag has two independent checkboxes, **Write rating** and **Write description** (both on by default). Only assets matching that tag get those fields written; a tag with the box unchecked writes nothing, logs nothing to `change_log`, and does *not* get the skip-marker tag (that marker means "we wanted to write, but your value was in the way" — not "we never intended to write").
+
+**What the shipped config does**: archived tags (`screenshot`, `meme`, `junk`) keep the description but skip the rating — archiving means "hide from the main timeline", where a star rating is meaningless, while the description still makes the asset searchable. Every other tag writes both. These are just starting values; change them any time under Tags (e.g. turn the description off for `id_document` to keep sensitive text out of that field).
+
+### `enabled_effects` (global effectors)
+
+Every write target is an independent effector, but `tag`, `visibility` and `album` are **global** switches, editable in **Config → Recognition Settings → Effectors & Retries** (`enabled_effects`); anything not listed is planned away entirely — no Immich write and no `change_log` entry. All three default to on.
+
+`rating` / `description` are **not** in that list — they moved to the per-tag switches above. Upgrade note: if a previous version had `rating` / `description` removed from `enabled_effects`, those fields will start being written again after upgrading; to stop them, uncheck the per-tag switches.
 
 The same panel contains:
 

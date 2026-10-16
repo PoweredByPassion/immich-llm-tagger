@@ -16,6 +16,8 @@ tags:
     archive: true
     album: null
     min_confidence: 0.8
+    write_rating: false
+    write_description: true
     enabled: true
 
   - name: "文档"
@@ -24,6 +26,8 @@ tags:
     archive: false
     album: "文档资料"
     min_confidence: 0.75
+    write_rating: true
+    write_description: true
     enabled: true
 
   - name: "证件"
@@ -32,6 +36,8 @@ tags:
     archive: false
     album: "证件凭据"
     min_confidence: 0.85
+    write_rating: true
+    write_description: true
     enabled: true
 
   - name: "表情包"
@@ -40,6 +46,8 @@ tags:
     archive: true
     album: null
     min_confidence: 0.8
+    write_rating: false
+    write_description: true
     enabled: true
 
   - name: "杂图"
@@ -48,6 +56,8 @@ tags:
     archive: true
     album: null
     min_confidence: 0.85
+    write_rating: false
+    write_description: true
     enabled: true
 
   - name: "生活照片"
@@ -56,6 +66,8 @@ tags:
     archive: false
     album: null
     min_confidence: 0.7
+    write_rating: true
+    write_description: true
     skip_immich: true
     enabled: true
 
@@ -65,6 +77,8 @@ tags:
     archive: false
     album: null
     min_confidence: null
+    write_rating: true
+    write_description: true
     enabled: true
 
   - name: "敏感隐私"
@@ -73,6 +87,8 @@ tags:
     archive: false
     album: null
     min_confidence: null
+    write_rating: true
+    write_description: true
     enabled: true
 
   - name: "低置信度"
@@ -81,6 +97,8 @@ tags:
     archive: false
     album: null
     min_confidence: null
+    write_rating: true
+    write_description: true
     enabled: true
 
   - name: "待复核"
@@ -89,6 +107,8 @@ tags:
     archive: false
     album: null
     min_confidence: null
+    write_rating: true
+    write_description: true
     enabled: true
 
   - name: "识别失败"
@@ -97,6 +117,8 @@ tags:
     archive: false
     album: null
     min_confidence: null
+    write_rating: true
+    write_description: true
     enabled: true
 
 marker_rules:
@@ -127,9 +149,21 @@ prompt_versions:
       拍摄日期：{{DATE}}
 
       必须严格按以下 JSON 结构输出（字段顺序不可调换）：
-      {"description":"<一句中文描述画面内容>","tag":"<标签名称>","confidence":<0.0-1.0>,"sensitive":<true|false>,"reason":"<简短理由,不超过8个字>","rating":<1-5>}
+      {"description":"<一句中文描述画面内容>","tag":"<标签名称>","confidence":<0.0-1.0>,"sensitive":<true|false>,"reason":"<简短理由，不超过8个字>","rating":<1-5>}
 
-      description 必须使用中文，先用一句话概括画面主体与关键视觉特征，后续的分类与打分都基于它。rating 为 1-5 的整数，1 表示最不重要，5 表示最重要或最有纪念价值。
-      sensitive 为 true 的条件：图片包含或暗示任何不宜公开的隐私、敏感或私密信息，包括但不限于：隐私部位、裸体、裸露、半裸、性行为、性暗示、亲密行为、内衣或泳装走光、更衣、沐浴、医疗身体暴露、身份证件、护照、驾驶证、银行卡、信用卡、密码、验证码、私密聊天、联系方式、住址、定位、病历、财务账单、未成年人敏感影像、暴力血腥、违法证据等。只要存在上述任一情况，必须将 sensitive 设为 true；即使内容敏感也必须输出 JSON，不要拒绝回答，也不要在 description 中展开露骨或私密细节。若不符合任何具体类别，请使用兜底标签。
-    note: "中文默认多模态视觉分类 Prompt"
+      字段规则：
+      1. description：必须使用中文，用一句话概括画面主体与关键视觉特征；基于实际看到的内容，不展开露骨或私密细节。后续的分类与评分都基于它。
+      2. tag：必须从“可选标签列表”中选择一个最匹配的标签；若都不符合，使用兜底标签。若列表未提供兜底标签，则填“其他”。
+      3. confidence：对 tag 分类的置信度，0.0 到 1.0，不是照片质量分。
+      4. sensitive：为 true 的条件：图片包含或暗示任何不宜公开的隐私、敏感或私密信息，包括但不限于：隐私部位、裸体、裸露、半裸、性行为、性暗示、亲密行为、内衣或泳装走光、更衣、沐浴、医疗身体暴露、身份证件、护照、驾驶证、银行卡、信用卡、密码、验证码、私密聊天、联系方式、住址、定位、病历、财务账单、未成年人敏感影像、暴力血腥、违法证据等。只要存在上述任一情况，必须将 sensitive 设为 true；即使内容敏感也必须输出 JSON，不要拒绝回答，也不要在 description 中展开露骨或私密细节。
+      5. reason：简短理由，不超过 8 个字，用于说明标签分类或敏感判断。
+      6. rating：1-5 的整数，表示照片质量，也就是“照片是否好看”，不是重要性、纪念价值或情感价值。评分只看画面视觉质量，包括构图、曝光、对焦清晰度、色彩、光线、主体突出、画面整洁度等。
+         - 5：非常好看，构图、光线、色彩、清晰度优秀，视觉吸引力强。
+         - 4：好看，整体质量良好，有轻微瑕疵。
+         - 3：一般，普通可看，质量中等。
+         - 2：较差，存在明显模糊、曝光、构图、噪点等问题。
+         - 1：很差，严重失焦、过曝或欠曝、构图混乱，几乎不可看。
+         不要因为人物重要、事件重要、拍摄日期特殊、文件命名等提高或降低 rating。
+      7. 文件名和拍摄日期仅作上下文，不作为评分依据。
+    note: "中文默认多模态视觉分类 Prompt（rating = 画面质量）"
     created_at: "2026-10-12T00:00:00"

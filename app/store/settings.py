@@ -26,9 +26,11 @@ DEFAULTS: dict[str, Any] = {
     "last_retention_run": None,     # epoch 秒（float），retention 24h 自管理时间戳
     "active_prompt_version_id": None,
     # --- Effector 开关与重试（§8.1）---
-    # 默认全开：升级后评分/描述立即对新资产生效。想"升级即静默"就
-    # 从这里移除 "rating"/"description"。
-    "enabled_effects": ["tag", "visibility", "album", "rating", "description"],
+    # 只列「全局」效应器：评分 / 描述已下放到标签维度（tags.write_rating /
+    # write_description，v12），不再受这里支配 —— 留着它们的名字不生效，
+    # 反而会让人以为关掉能停写。老库里存的 rating/description 是惰性残留，
+    # 本页保存时自然被覆盖掉。
+    "enabled_effects": ["tag", "visibility", "album"],
     # None = 未显式配置 → 按语言解析（zh 保留人工信息 / en manual-kept）。
     # **不能**把中文名写死成默认值：那会让英文实例写出一个中文标签名。
     "skip_marker_tag_name": None,

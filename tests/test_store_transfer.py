@@ -24,6 +24,15 @@ def db(tmp_path: Path) -> Database:
     return database
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _shipped_prompt(filename: str) -> str:
+    """出厂配置里的那唯一一条 Prompt 版本 body。"""
+    data = parse_yaml((REPO_ROOT / filename).read_text(encoding="utf-8"))
+    return data["prompt_versions"][0]["body"]
+
+
 def _seed(db: Database) -> None:
     primary = crud.insert_tag(db, name="人物", kind="primary", description="人")
     crud.insert_tag(db, name="other", kind="primary")  # 兜底 tag（默认 fallback_tag_name）
@@ -148,6 +157,75 @@ def test_import_missing_tables_treated_as_empty(db: Database) -> None:
         assert conn.execute(
             "SELECT COUNT(*) c FROM tags"
         ).fetchone()["c"] == 2
+
+
+def test_write_flags_survive_export_import(db: Database) -> None:
+    """write_rating / write_description 是标签配置的一部分，必须随导出走。"""
+    crud.insert_tag(db, name="人物", kind="primary", write_rating=False)
+    crud.insert_tag(db, name="other", kind="primary")   # 兜底 tag
+    data = export_config(db)
+    row = next(t for t in data["tags"] if t["name"] == "人物")
+    assert (row["write_rating"], row["write_description"]) == (0, 1)
+
+    import_config(db, parse_yaml(render_yaml(data)))
+    # 导入按名称重映射，id 会变 → 按名字查
+    with db.connect() as conn:
+        got = conn.execute(
+            "SELECT write_rating, write_description FROM tags WHERE name = '人物'"
+        ).fetchone()
+    assert (got["write_rating"], got["write_description"]) == (0, 1)
+
+
+def test_import_legacy_tags_default_to_writing_metadata(db: Database) -> None:
+    """旧版导出文件没有这两列 → 按默认（写）导入，不能静默变成不写。"""
+    import_config(db, {"tags": [
+        {"name": "人物", "kind": "primary"},
+        {"name": "other", "kind": "primary"},
+    ]})
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT write_rating, write_description FROM tags").fetchall()
+    assert all((r["write_rating"], r["write_description"]) == (1, 1) for r in rows)
+
+
+def test_shipped_configs_are_importable_and_skip_rating_when_archived(
+        tmp_path: Path) -> None:
+    """出厂配置（zh/en）：必须能直接导入，且归档标签不写评分、仍写描述。
+
+    归档 = 从主时间线隐去，星级评分对这类图没有意义；描述留着还能被搜到。
+    """
+    for name in ("autotag-config.zh.yaml", "autotag-config.en.yaml"):
+        data = parse_yaml((REPO_ROOT / name).read_text(encoding="utf-8"))
+
+        for tag in data["tags"]:
+            if tag["archive"]:
+                assert tag["write_rating"] is False, (name, tag["name"])
+            else:
+                assert tag["write_rating"] is True, (name, tag["name"])
+            assert tag["write_description"] is True, (name, tag["name"])
+
+        # 导入一整套（含 prompt 版本 / marker 规则 / settings）不报错
+        fresh = Database(tmp_path / f"{name}.db")
+        migrate(fresh)
+        import_config(fresh, data)
+
+
+def test_shipped_prompts_rate_visual_quality_not_importance() -> None:
+    """出厂 Prompt 钉住评分语义：评画面质量，不是重要性/纪念价值。
+
+    这是产品语义，不是措辞 —— 旧版 Prompt 正是按「1 = 最不重要」评的，回退不易察觉。
+    """
+    zh = _shipped_prompt("autotag-config.zh.yaml")
+    en = _shipped_prompt("autotag-config.en.yaml")
+
+    assert "不是重要性、纪念价值或情感价值" in zh
+    assert "not how important, memorable or emotionally significant" in en
+    # confidence 不是照片质量分（两者语义不能混）
+    assert "不是照片质量分" in zh
+    assert "not a photo quality score" in en
+    # 文件名 / 拍摄日期只作上下文
+    assert "不作为评分依据" in zh
+    assert "never a basis for the rating" in en
 
 
 def test_import_unknown_extra_keys_rejected(db: Database) -> None:

@@ -1,11 +1,14 @@
-"""评分 effector：字段非空判定 + 三步跳过规则（§5.8.1）。"""
+"""评分 effector：标签开关（write_rating）+ 字段非空判定 + 三步跳过规则（§5.8.1）。"""
 from __future__ import annotations
 
-from app.classify.effectors.base import Effect, EffectContext, PlanOutcome
+from app.classify.effectors.base import Effect, EffectContext, PlanOutcome, tag_writes
 
 
 def plan(ctx: EffectContext, last_written: dict, outcome: PlanOutcome) -> list[Effect]:
-    if "rating" not in ctx.enabled or ctx.gates.metadata_blocked:
+    # 标签声明不写评分 → 直接返回，**不**记 outcome.skipped：
+    # 跳过标记（"保留人工信息"）的语义是"我们自己想写但被你写的值挡住"，
+    # 这里压根没打算写，打标记反而误导。
+    if ctx.gates.metadata_blocked or not tag_writes(ctx, "write_rating"):
         return []
     new = ctx.analysis.rating
     if new is None:

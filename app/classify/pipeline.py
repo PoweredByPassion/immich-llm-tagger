@@ -41,8 +41,9 @@ class PipelineConfig:
     concurrency_owner: int
     # --- Effector 开关与重试（§8.1）---
     # 默认值让既有构造点无需改动；生产路径由 build_pipeline_config 覆盖。
-    enabled_effects: frozenset[str] = frozenset(
-        {"tag", "visibility", "album", "rating", "description"})
+    # 只有全局效应的那三个：评分/描述改由标签维度控制（tags.write_rating /
+    # write_description，§5.8），不在这个集合里。
+    enabled_effects: frozenset[str] = frozenset({"tag", "visibility", "album"})
     skip_marker_tag_name: str = "保留人工信息"
     apply_max_attempts: int = 3
 

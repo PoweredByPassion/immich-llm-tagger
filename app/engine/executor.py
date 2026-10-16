@@ -52,6 +52,9 @@ DEFAULT_PROMPT_TEMPLATE = (
     'Respond with JSON: {"description": "<one sentence>", "tag": "<tag>", '
     '"confidence": <0-1>, "sensitive": <bool>, "reason": "<short>", '
     '"rating": <1-5>}\n'
+    '"rating" says how good the photo looks (composition, exposure, focus, '
+    "colour, light) - never how important, memorable or emotionally "
+    "significant the subject is; the filename and date are context only.\n"
     "If none fits, use the fallback tag. Set "
     '"sensitive" true for anything not safe to share publicly (nudity, '
     "intimate or medical images, ID cards, passports, bank cards, passwords, "

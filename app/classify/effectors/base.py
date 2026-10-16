@@ -78,3 +78,15 @@ class PlanOutcome:
     """规划期的旁路结果（不打标签、不记账）。"""
 
     skipped: list[str] = field(default_factory=list)   # ["rating"] / ["description"]
+
+
+def tag_writes(ctx: EffectContext, field: str) -> bool:
+    """该标签是否允许写这个字段（v12 的 per-tag 开关：write_rating / write_description）。
+
+    与 archive（是否归档）、album（进哪个相册）、skip_immich（是否写 Immich）同一套
+    「标签即开关」模型 —— 评分/描述不再是全局效应器开关。
+
+    tag_def 为 None（模型给的 tag 没匹配上任何启用的主标签）时返回 True：
+    没有标签定义就没有可读的开关，维持既有行为（照常写）。
+    """
+    return bool(getattr(ctx.tag_def, field, True))
