@@ -30,10 +30,17 @@
       <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <div>
           <label for="model" class="mb-1.5 block text-xs font-medium text-[#8a8f98]">{{ tr("config.llm.model") }}</label>
-          <input type="text" id="model" name="model" list="model-options" value="{{ conn.model }}"
+          <input type="text" id="model" name="model" value="{{ conn.model }}"
                  placeholder="qwen-vl-plus"
                  class="input w-full font-mono">
-          <datalist id="model-options"></datalist>
+          {# 真下拉：datalist 会按输入框已有内容做前缀过滤，已填 model 时只剩一条，
+             表现为"点下拉出不来别的模型"。改用独立 select，选中即回填输入框，
+             搜索（自由输入）与选择（列全部）互不干扰。 #}
+          <select id="model-picker" class="input w-full font-mono mt-2 hidden"
+                  aria-label="{{ tr('config.llm.model_picker') }}"
+                  onchange="if (this.value) document.getElementById('model').value = this.value;">
+            <option value="">{{ tr("config.llm.model_picker") }}</option>
+          </select>
           <div class="mt-1.5 flex items-center gap-2">
             <button type="button" onclick="fetchModels(this)" class="btn btn-secondary text-xs h-7 px-3">
               {{ tr("config.llm.fetch_models") }}
@@ -117,7 +124,10 @@
 <script>
 function fetchModels(btn) {
   const hint = {{ tr("config.llm.fetch_empty_hint") | tojson }};
+  const placeholder = {{ tr("config.llm.model_picker") | tojson }};
   const hintEl = document.getElementById("model-fetch-hint");
+  const picker = document.getElementById("model-picker");
+  const modelInput = document.getElementById("model");
   btn.disabled = true;
   hintEl.textContent = "";
   // POST：新鲜 api_key 走请求体，绝不进 URL（访问日志/历史/Referer）。
@@ -129,12 +139,20 @@ function fetchModels(btn) {
       api_key: document.getElementById("llm_api_key").value,
     }),
   }).then(r => r.json()).then(d => {
-    const dl = document.getElementById("model-options");
-    dl.innerHTML = "";
-    (d.models || []).forEach(m => {
-      const o = document.createElement("option"); o.value = m; dl.appendChild(o);
+    const models = d.models || [];
+    // select 列全部模型，不受输入框当前内容影响（datalist 的前缀过滤才是原 bug）。
+    picker.innerHTML = "";
+    const ph = document.createElement("option");
+    ph.value = ""; ph.textContent = placeholder;
+    picker.appendChild(ph);
+    models.forEach(m => {
+      const o = document.createElement("option"); o.value = m; o.textContent = m;
+      picker.appendChild(o);
     });
-    if (!d.models || !d.models.length) {
+    picker.classList.toggle("hidden", models.length === 0);
+    // 已填的 model 若在列表内就同步选中，避免输入框与下拉显示不一致。
+    picker.value = models.includes(modelInput.value) ? modelInput.value : "";
+    if (!models.length) {
       // 优先展示服务端错误原文（截断防超长），否则退回通用提示。
       hintEl.textContent = d.error ? (hint + " — " + d.error).slice(0, 300) : hint;
     }

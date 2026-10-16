@@ -2,6 +2,10 @@
 
 排除语义：被排除的图片根本不进入自动分类候选
 （区别于"已完成"计入 total）。type=reviewed 无值，命中"已复核"的图片即排除。
+
+页面已与「处理范围」合并（见 config_scope.render_page）；本模块只保留动作端点，
+渲染一律走 render_page，避免两半分页。GET /config/exclusions 的重定向在
+config_scope.py 里注册。
 """
 from __future__ import annotations
 
@@ -15,44 +19,14 @@ from app.store.crud import (
     update_exclusion,
 )
 from app.store.errors import ValidationError
-from app.store.tags import load_tags
-from app.web.i18n import lang_from_cookie, render_problems, t
-from app.web.routes.config_conn import _templates
+from app.web.i18n import lang_from_cookie, render_problems
+from app.web.routes.config_scope import render_page
 
 router = APIRouter(prefix="/config")
-
-_TYPE_BADGE_KEYS = {
-    "album": "config.exclusions.badge.album",
-    "path": "config.exclusions.badge.path",
-    "tag": "config.exclusions.badge.tag",
-    "reviewed": "common.reviewed",
-}
 
 
 def _db(request: Request):
     return request.app.state.db
-
-
-def _rules(db):
-    with db.connect() as conn:
-        return conn.execute(
-            "SELECT id, type, value, enabled FROM exclusions ORDER BY id"
-        ).fetchall()
-
-
-def _page(request: Request, *, error: str | None = None, saved: bool = False):
-    lang = lang_from_cookie(request.cookies)
-    return _templates(request).TemplateResponse(
-        request,
-        "config/exclusions.html",
-        {
-            "rules": _rules(_db(request)),
-            "tags": load_tags(_db(request)),
-            "badges": {k: t(v, lang) for k, v in _TYPE_BADGE_KEYS.items()},
-            "error": error,
-            "saved": saved,
-        },
-    )
 
 
 def _create_or_update(request: Request, *, rule_id: int | None, form):
@@ -65,13 +39,8 @@ def _create_or_update(request: Request, *, rule_id: int | None, form):
         else:
             update_exclusion(_db(request), rule_id, type=type_, value=value)
     except ValidationError as exc:
-        return _page(request, error=render_problems(exc.problems, lang))
-    return _page(request, saved=True)
-
-
-@router.get("/exclusions", response_class=HTMLResponse)
-def exclusions_page(request: Request):
-    return _page(request)
+        return render_page(request, error=render_problems(exc.problems, lang))
+    return render_page(request, saved=True)
 
 
 @router.post("/exclusions", response_class=HTMLResponse)
@@ -92,10 +61,10 @@ def exclusions_toggle(request: Request, rule_id: int):
         ).fetchone()
     if row is not None:
         set_exclusion_enabled(_db(request), rule_id, not bool(row["enabled"]))
-    return _page(request)
+    return render_page(request)
 
 
 @router.post("/exclusions/{rule_id}/delete", response_class=HTMLResponse)
 def exclusions_delete(request: Request, rule_id: int):
     delete_exclusion(_db(request), rule_id)
-    return _page(request)
+    return render_page(request)

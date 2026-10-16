@@ -20,7 +20,6 @@ from app.store.crud import (
     set_exclusion_enabled,
 )
 from app.web.app import create_app
-from app.web.routes import config_exclusions
 
 
 @pytest.fixture()
@@ -33,7 +32,6 @@ def client(data_dir: Path):
     app = create_app(
         data_dir=data_dir, bootstrap=BootstrapConfig(data_dir=str(data_dir))
     )
-    app.include_router(config_exclusions.router)
     with TestClient(app) as c:
         yield c
 
@@ -41,16 +39,23 @@ def client(data_dir: Path):
 # ------------------------------------------------------------------- render
 
 def test_exclusions_page_reachable_empty(client):
-    html = client.get("/config/exclusions").text
+    html = client.get("/config/scope").text
     assert 'action="/config/exclusions"' in html  # 新增表单存在
     assert "还没有排除规则" in html  # 空态
     assert "排除的图片不会进入自动分类" in html
 
 
+def test_exclusions_legacy_url_redirects_to_merged_page(client):
+    """排除规则页已并入 /config/scope；旧 URL 保留 302，老书签不致死。"""
+    resp = client.get("/config/exclusions", follow_redirects=False)
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "/config/scope"
+
+
 def test_exclusions_page_renders_rules(client):
     db = client.app.state.db
     rid = insert_exclusion(db, type="path", value="/photos/private")
-    html = client.get("/config/exclusions").text
+    html = client.get("/config/scope").text
     assert "/photos/private" in html
     assert f"/config/exclusions/{rid}/toggle" in html
     assert f"/config/exclusions/{rid}/delete" in html
@@ -61,7 +66,7 @@ def test_exclusions_page_renders_rules(client):
 def test_exclusions_reviewed_row_has_no_value(client):
     db = client.app.state.db
     insert_exclusion(db, type="reviewed", value="")
-    html = client.get("/config/exclusions").text
+    html = client.get("/config/scope").text
     assert ">reviewed<" in html
     assert "已复核" in html
 
@@ -70,7 +75,7 @@ def test_exclusions_type_dropdown_lists_all_tags(client):
     db = client.app.state.db
     insert_tag(db, name="风景", kind="primary", description="")
     insert_tag(db, name="低置信", kind="marker", description="")
-    html = client.get("/config/exclusions").text
+    html = client.get("/config/scope").text
     assert ">风景</option>" in html  # tag 下拉列全部标签（不分 kind）
     assert ">低置信</option>" in html
 

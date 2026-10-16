@@ -12,7 +12,7 @@ def test_migrate_creates_schema_version_table(tmp_path: Path) -> None:
     migrate(db)
     with db.connect() as conn:
         rows = conn.execute("SELECT version FROM schema_version ORDER BY version").fetchall()
-    assert [r["version"] for r in rows] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    assert [r["version"] for r in rows] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
 
 
 def test_migrate_creates_all_config_tables(tmp_path: Path) -> None:
@@ -47,7 +47,7 @@ def test_migrate_is_idempotent(tmp_path: Path) -> None:
     migrate(db)
     with db.connect() as conn:
         count = conn.execute("SELECT COUNT(*) AS c FROM schema_version").fetchone()["c"]
-    assert count == 10
+    assert count == 11
 
 
 def test_current_version_zero_when_fresh(tmp_path: Path) -> None:
@@ -339,7 +339,7 @@ def test_v9_rebuild_preserves_rows_and_columns(tmp_path: Path) -> None:
         conn.execute("INSERT INTO jobs (type, status) VALUES ('single','queued')")
         conn.execute("DELETE FROM jobs WHERE id = 2")   # 制造 id 空洞
 
-    assert migrate(db) == 10
+    assert migrate(db) == 11
 
     with db.connect() as conn:
         row = conn.execute("SELECT * FROM jobs WHERE id = 1").fetchone()
@@ -366,7 +366,7 @@ def test_v9_preserves_autoincrement_counter_when_jobs_empty(tmp_path: Path) -> N
             conn.execute("INSERT INTO jobs (type, status) VALUES ('scan','done')")
         conn.execute("DELETE FROM jobs")              # 计数器停在 3，表为空
 
-    assert migrate(db) == 10
+    assert migrate(db) == 11
 
     with db.connect() as conn:
         assert conn.execute("SELECT COUNT(*) AS n FROM jobs").fetchone()["n"] == 0
@@ -381,9 +381,113 @@ def test_v10_drops_llm_concurrency_column(tmp_path: Path) -> None:
     fresh 库会先经 v1 建出该列、再被 v10 DROP，等价于升级已有库的路径。
     """
     db = Database(tmp_path / "t.db")
-    assert migrate(db) == 10
+    assert migrate(db) == 11
     with db.connect() as conn:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(llm_conn)")}
     assert "concurrency" not in cols
     assert {"base_url", "api_key", "model", "timeout", "max_tokens",
             "multimodal"} <= cols
+
+
+def _seed_v10_db(tmp_path: Path) -> Database:
+    """造一个停在 v10 的库（跑 v1..v10 脚本 + 登记版本号），
+    供 v11 的「升级既有库」断言使用。"""
+    db = Database(tmp_path / "v10.db")
+    with db.connect() as conn:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS schema_version ("
+            "    version    INTEGER PRIMARY KEY,"
+            "    applied_at TEXT NOT NULL DEFAULT (datetime('now'))"
+            ")"
+        )
+        for n in range(1, 11):
+            conn.executescript(
+                (MIGRATIONS_DIR / f"v{n}.sql").read_text(encoding="utf-8")
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (?)", (n,)
+            )
+    assert current_version(db) == 10
+    return db
+
+
+def test_v11_adds_columns_and_widens_change_log(tmp_path: Path) -> None:
+    db = Database(tmp_path / "t.db")
+    assert migrate(db) == 11
+    with db.connect() as conn:
+        cols_r = {r["name"] for r in conn.execute("PRAGMA table_info(asset_records)")}
+        cols_s = {r["name"] for r in conn.execute("PRAGMA table_info(asset_state)")}
+        assert {"rating", "description"} <= cols_r
+        assert {"rating", "description", "apply_attempts"} <= cols_s
+        # 枚举已扩容：写不进去就说明 CHECK 没重建
+        conn.execute(
+            "INSERT INTO change_log (job_id, asset_id, action, direction, payload) "
+            "VALUES (NULL, 'a1', 'rating_set', 'apply', '{\"old\": null, \"new\": 4}')"
+        )
+
+
+def test_v11_backfills_applied_at_only_for_applied_rows(tmp_path: Path) -> None:
+    """§6.2：不回填 → 改口径后整库历史资产被判「未完成」→ 全量重跑。"""
+    db = _seed_v10_db(tmp_path)
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO asset_records (asset_id, source, status, dry_run, created_at) "
+            "VALUES ('ok-live','poll','ok',0,'2026-01-01 00:00:00'),"
+            "       ('ok-dry','poll','ok',1,'2026-01-01 00:00:00'),"
+            "       ('err','poll','error',0,'2026-01-01 00:00:00')"
+        )
+
+    assert migrate(db) == 11
+
+    with db.connect() as conn:
+        got = {r["asset_id"]: r["applied_at"] for r in conn.execute(
+            "SELECT asset_id, applied_at FROM asset_records")}
+    assert got["ok-live"] == "2026-01-01 00:00:00"   # 回填成 created_at
+    assert got["ok-dry"] is None                     # dry_run=1 不算应用过
+    assert got["err"] is None                        # status != 'ok'
+
+
+def test_v11_change_log_rebuild_keeps_autoincrement(tmp_path: Path) -> None:
+    """表重建（v9 模式）会连 sqlite_sequence 行一起 DROP 掉。
+
+    再造「有行 → 删光」的空表状态：seq 归零则新行复用旧 id，
+    change_log 的 id 是 undo 的定位依据，复用即误伤。"""
+    db = _seed_v10_db(tmp_path)
+    with db.connect() as conn:
+        for _ in range(2):
+            conn.execute("INSERT INTO change_log (asset_id, action, direction, payload) "
+                         "VALUES ('a1','tag_add','apply','{}')")
+        conn.execute("DELETE FROM change_log")        # 表空，seq 停在 2
+
+    assert migrate(db) == 11
+
+    with db.connect() as conn:
+        conn.execute("INSERT INTO change_log (asset_id, action, direction, payload) "
+                     "VALUES ('a2','rating_set','apply','{}')")
+        assert conn.execute(
+            "SELECT MAX(id) AS m FROM change_log").fetchone()["m"] == 3
+
+
+def test_v11_recreates_change_log_job_index(tmp_path: Path) -> None:
+    """DROP TABLE 会把索引一起删掉，必须重建（idx_change_log_job）。"""
+    db = _seed_v10_db(tmp_path)
+    migrate(db)
+    with db.connect() as conn:
+        idx = {r["name"] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index'")}
+    assert "idx_change_log_job" in idx
+
+
+def test_v11_adds_change_log_asset_action_index(tmp_path: Path) -> None:
+    """v11 重建 change_log 时补上 (asset_id, action) 覆盖索引。
+
+    `has_system_archive` 与 `last_written_value`（后者每张图分类调两次）都按
+    `asset_id`（+action）过滤，而 change_log 刻意永不清理 —— 没这个索引这三个
+    热查询每次都全表 SCAN change_log，随库增长线性劣化。
+    """
+    db = Database(tmp_path / "t.db")
+    migrate(db)
+    with db.connect() as conn:
+        idx = {r["name"] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index'")}
+    assert "idx_change_log_asset_action" in idx

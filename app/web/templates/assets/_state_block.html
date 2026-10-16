@@ -30,13 +30,22 @@
     <div>
       <dt class="text-xs text-zinc-400">{{ tr("assets.state.badges") }}</dt>
       <dd class="mt-1 flex flex-wrap gap-1.5">
+        {% set attempts = state.apply_attempts or 0 %}
+        {% set max_attempts = apply_max_attempts or 0 %}
+        {% set gave_up = attempts > 0 and max_attempts > 0 and attempts >= max_attempts %}
+        {% set retrying = attempts > 0 and not gave_up %}
         {% if state.manual_override %}
         <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-mono bg-amber-500/10 text-amber-300 border border-amber-500/20">{{ tr("assets.state.manual_override") }}</span>
         {% endif %}
         {% if state.reviewed %}
         <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-mono bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">{{ tr("common.reviewed") }}</span>
         {% endif %}
-        {% if not state.manual_override and not state.reviewed %}
+        {% if gave_up %}
+        <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-mono bg-rose-500/10 text-rose-400 border border-rose-500/20">{{ tr("assets.apply_gave_up") }}</span>
+        {% elif retrying %}
+        <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-mono bg-amber-500/10 text-amber-300 border border-amber-500/20">{{ tr("assets.retry_pending") % (attempts, max_attempts if max_attempts > 0 else attempts) }}</span>
+        {% endif %}
+        {% if not state.manual_override and not state.reviewed and not gave_up and not retrying %}
         <span class="text-xs text-zinc-500">{{ tr("assets.detail.none") }}</span>
         {% endif %}
       </dd>

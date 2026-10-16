@@ -165,12 +165,14 @@ def create_app(
         config_markers,
         config_scope,
         config_transfer,
+        config_webhook,
         danger_ui,
     )
     app.include_router(config_scope.router)
     app.include_router(config_exclusions.router)
     app.include_router(config_markers.router)
     app.include_router(config_transfer.router)
+    app.include_router(config_webhook.router)
     app.include_router(danger_ui.router)
     app.include_router(assets_ui.router)
     app.include_router(usage_ui.router)

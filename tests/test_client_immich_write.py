@@ -333,6 +333,50 @@ def test_set_visibility_invalid_value_raises() -> None:
         _client(lambda r: httpx.Response(200)).set_visibility([ASSET_ID], "bogus")
 
 
+# ------------------------------------------------------------ asset properties
+
+
+def test_set_asset_properties_carries_all_three_fields() -> None:
+    """一次 PUT /assets 带齐 visibility+rating+description。"""
+    rec = Recorder({("PUT", "/api/assets"): None})
+    _client(rec).set_asset_properties(
+        [ASSET_ID], visibility="archive", rating=4, description="一只猫")
+    method, path, body = rec.calls[0]
+    assert (method, path) == ("PUT", "/api/assets")
+    assert json.loads(body) == {
+        "ids": [ASSET_ID], "visibility": "archive",
+        "rating": 4, "description": "一只猫",
+    }
+
+
+def test_set_asset_properties_omits_unspecified_fields() -> None:
+    """未给的字段必须**缺席**（Unset ≠ null）：缺席=不动，null=置空。"""
+    rec = Recorder({("PUT", "/api/assets"): None})
+    _client(rec).set_asset_properties([ASSET_ID], rating=None)
+    assert json.loads(rec.calls[0][2]) == {"ids": [ASSET_ID], "rating": None}
+
+
+def test_set_asset_properties_chunks_and_empty_is_noop() -> None:
+    assets = [f"22222222-2222-2222-2222-{i:012d}" for i in range(1001)]
+    rec = Recorder({("PUT", "/api/assets"): None})
+    _client(rec).set_asset_properties(assets, rating=3)
+    puts = [c for c in rec.calls if c[0] == "PUT"]
+    assert [len(json.loads(b)["ids"]) for _, _, b in puts] == [500, 500, 1]
+
+    def boom(request: httpx.Request) -> httpx.Response:
+        pytest.fail("空 asset 列表不应发请求")
+
+    _client(boom).set_asset_properties([], rating=3)
+
+
+def test_set_asset_properties_rejects_bad_visibility() -> None:
+    """裸字符串必须先转 AssetVisibility —— 直接塞进 DTO 会在 to_dict
+    调 .value 时 AttributeError，且报错离现场很远。"""
+    with pytest.raises(ImmichError):
+        _client(lambda r: httpx.Response(204)).set_asset_properties(
+            [ASSET_ID], visibility="bogus")
+
+
 # --------------------------------------------------------------- albums
 
 
@@ -377,6 +421,13 @@ def test_ensure_album_filters_by_name_query() -> None:
 
     _client(handler).ensure_album("查询相册")
     assert seen["name"] == "查询相册"
+
+
+def test_list_albums_returns_all() -> None:
+    rec = Recorder({("GET", "/api/albums"): [_album_payload("3", "截图相册")]})
+    albums = _client(rec).list_albums()
+    assert [a.album_name for a in albums] == ["截图相册"]
+    assert rec.calls[0][2] == b""      # 不带 name 查询参数
 
 
 def test_add_to_album_single_chunk() -> None:

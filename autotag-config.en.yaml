@@ -106,7 +106,7 @@ exclusions: []
 
 prompt_versions:
   - body: |
-      You are classifying ONE image from a personal photo library. Reply with ONLY a JSON object, no prose, no markdown fences.
+      You are classifying ONE image from a personal photo library. First describe what you actually see, then classify, then rate. Reply with ONLY a JSON object, no prose, no markdown fences.
 
       Pick exactly one tag from the list below:
       {{TAG_LIST}}
@@ -114,11 +114,12 @@ prompt_versions:
       File: {{FILENAME}}
       Date: {{DATE}}
 
-      Output exactly this JSON shape:
-      {"tag":"<one of the primary tags>","confidence":<0.0-1.0>,"sensitive":<true|false>,"reason":"<at most 8 words>"}
+      Output exactly this JSON shape, keeping the field order:
+      {"description":"<one sentence about the image>","tag":"<one of the primary tags>","confidence":<0.0-1.0>,"sensitive":<true|false>,"reason":"<at most 8 words>","rating":<1-5>}
 
-      "sensitive" = identity documents, bank cards, passwords, private messages, medical or financial records.
-      Always output the JSON object, even for sensitive or private images - just set sensitive to true. Never refuse or apologise.
+      "description" comes first: state what you actually see in one sentence, then let the tag, confidence and rating build on it. "rating" is an integer 1-5 (1 = least important, 5 = most important or keepsake).
+      "sensitive" must be true whenever the image contains or implies anything not safe to share publicly: intimate body parts, nudity, partial nudity, sexual acts, sexual suggestiveness, intimate contact, underwear or swimwear exposure, changing clothes, bathing, medically exposed bodies, ID cards, passports, driving licences, bank or credit cards, passwords, one-time codes, private chats, contact details, home addresses, location data, medical records, financial bills, sensitive imagery of minors, violence or gore, evidence of illegal activity. If ANY of these applies, set "sensitive" to true.
+      Always output the JSON object, even for sensitive or private images - just set sensitive to true. Never refuse or apologise, and never spell out explicit or intimate details in "description".
       If none fits, use the fallback tag.
     note: "Default English multimodal vision prompt version"
     created_at: "2026-10-12T00:00:00"

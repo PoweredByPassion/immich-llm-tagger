@@ -12,77 +12,97 @@
     </h1>
   </div>
 
+  <!-- ① 本地状态快照 -->
   <div id="state-block">
     {% include "assets/_state_block.html" %}
   </div>
 
-  <!-- 快捷操作区 -->
-  <div class="flex flex-wrap items-center gap-3">
-    <form hx-post="/assets/{{ asset_id }}/sync" hx-target="#sync-result" hx-swap="innerHTML">
-      <button type="submit"
-              class="px-4 py-2 rounded bg-[#181b24] hover:bg-[#202430] active:scale-[0.98] border border-[#20232d] text-sm font-medium text-zinc-200 transition">
-        {{ tr("assets.detail.sync") }}
-      </button>
-    </form>
-
-    <div x-data="{ confirmOpen: false }">
-      <button type="button" @click="confirmOpen = true"
-              class="px-4 py-2 rounded bg-[#5e6ad2] hover:bg-[#6f7be8] active:scale-[0.98] text-sm font-medium text-white transition shadow-sm">
-        {{ tr("assets.detail.reclassify") }}
-      </button>
-      <div x-show="confirmOpen" x-cloak
-           class="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm px-4"
-           role="dialog" aria-modal="true">
-        <div class="w-full max-w-sm rounded bg-[#13151c] border border-[#20232d] p-6 shadow-2xl">
-          <h2 class="mb-2 text-base font-semibold text-zinc-100">{{ tr("assets.detail.reclassify") }}</h2>
-          <p class="mb-5 text-sm text-zinc-300">{{ tr("assets.detail.reclassify_body") }}{% if state and state.manual_override %}{{ tr("assets.detail.reclassify_body2") }}{% endif %}{{ tr("assets.detail.reclassify_body3") }}</p>
-          <div class="flex justify-end gap-3">
-            <button type="button" @click="confirmOpen = false"
-                    class="px-4 py-2 rounded bg-[#181b24] hover:bg-[#202430] border border-[#20232d] text-sm text-zinc-300 font-medium transition">{{ tr("config.common.cancel") }}</button>
-            <form method="post" action="/assets/{{ asset_id }}/reclassify" class="inline">
-              <button type="submit"
-                      class="px-4 py-2 rounded bg-[#5e6ad2] hover:bg-[#6f7be8] text-sm font-medium text-white transition shadow-sm">{{ tr("assets.detail.confirm_rerun") }}</button>
-            </form>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <div x-data="{ confirmOpen: false }" class="flex items-center gap-3">
-      <form hx-post="/assets/{{ asset_id }}/review" hx-target="#review-result" hx-swap="innerHTML">
-        <button type="submit"
-                class="px-4 py-2 rounded bg-[#181b24] hover:bg-[#202430] active:scale-[0.98] border border-[#20232d] text-sm font-medium text-zinc-200 transition">
-          {% if state and state.reviewed %}{{ tr("assets.review.unmark") }}{% else %}{{ tr("assets.review.mark") }}{% endif %}
-        </button>
-      </form>
-      {% if state and state.manual_override %}
-      <button type="button" @click="confirmOpen = true"
-              class="px-4 py-2 rounded bg-amber-500/10 hover:bg-amber-500/20 active:scale-[0.98] border border-amber-500/30 text-sm font-medium text-amber-300 transition">
-        {{ tr("assets.detail.cancel_override") }}
-      </button>
-      <div x-show="confirmOpen" x-cloak
-           class="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm px-4"
-           role="dialog" aria-modal="true">
-        <div class="w-full max-w-sm rounded bg-[#13151c] border border-[#20232d] p-6 shadow-2xl">
-          <h2 class="mb-2 text-base font-semibold text-zinc-100">{{ tr("assets.detail.override_clear_title") }}</h2>
-          <p class="mb-5 text-sm text-zinc-300">{{ tr("assets.detail.override_clear_body") }}</p>
-          <div class="flex justify-end gap-3">
-            <button type="button" @click="confirmOpen = false"
-                    class="px-4 py-2 rounded bg-[#181b24] hover:bg-[#202430] border border-[#20232d] text-sm text-zinc-300 font-medium transition">{{ tr("common.back") }}</button>
-            <button type="button" @click="confirmOpen = false"
-                    hx-post="/assets/{{ asset_id }}/override/clear" hx-target="#review-result" hx-swap="innerHTML"
-                    class="px-4 py-2 rounded bg-amber-500 hover:bg-amber-400 text-sm font-medium text-zinc-950 transition">{{ tr("assets.detail.confirm_override_clear") }}</button>
-          </div>
-        </div>
-      </div>
+  <!-- ② 图片预览与 Immich 跳转 -->
+  <section class="rounded bg-[#13151c] border border-[#20232d] p-5 space-y-3">
+    <div class="flex flex-wrap items-center justify-between gap-3">
+      <h2 class="text-xs font-semibold uppercase tracking-wider text-zinc-400 font-mono">{{ tr("assets.detail.preview_title") }}</h2>
+      {% if immich_url %}
+      <a href="{{ immich_url }}" target="_blank" rel="noopener noreferrer"
+         class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-[#181b24] hover:bg-[#202430] border border-[#20232d] text-xs font-medium text-zinc-200 transition">
+        {{ tr("assets.card.open_immich") }}
+        <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 6H18v4.5M17.4 6.6l-6.9 6.9M15 12.75V17.25A1.75 1.75 0 0113.25 19H6.75A1.75 1.75 0 015 17.25V10.75A1.75 1.75 0 016.75 9H11.25"/>
+        </svg>
+      </a>
+      {% else %}
+      <span class="text-xs text-zinc-500">{{ tr("common.immich_not_configured") }}</span>
       {% endif %}
     </div>
-  </div>
+    <div class="rounded bg-[#0d0f14] border border-[#20232d] overflow-hidden flex items-center justify-center min-h-[10rem]">
+      <img src="/assets/{{ asset_id }}/preview" alt="" loading="lazy"
+           class="max-h-[420px] w-auto object-contain"
+           onerror="this.classList.add('hidden');document.getElementById('preview-fallback').classList.remove('hidden');">
+      <p id="preview-fallback" class="hidden p-8 text-sm text-zinc-500">{{ tr("assets.detail.preview_failed") }}</p>
+    </div>
+  </section>
 
-  <div id="sync-result"></div>
-  <div id="review-result"></div>
+  <!-- ③ 分类历史表格 -->
+  <section class="space-y-3.5">
+    <h2 class="text-base font-semibold text-zinc-100">{{ tr("assets.detail.history") }}</h2>
+    {% if records %}
+    <div class="rounded border border-[#20232d] bg-[#13151c] overflow-hidden">
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm text-left">
+          <thead class="bg-[#181b24]/80 text-zinc-400 font-mono text-xs border-b border-[#20232d]">
+            <tr>
+              <th class="py-3 px-4 font-medium">{{ tr("assets.detail.th.predicted") }}</th>
+              <th class="py-3 px-4 font-medium">{{ tr("assets.detail.th.confidence") }}</th>
+              <th class="py-3 px-4 font-medium">{{ tr("jobs.detail.th.source") }}</th>
+              <th class="py-3 px-4 font-medium">{{ tr("assets.detail.th.job") }}</th>
+              <th class="py-3 px-4 font-medium">{{ tr("assets.detail.th.model") }}</th>
+              <th class="py-3 px-4 font-medium">{{ tr("assets.detail.th.tokens") }}</th>
+              <th class="py-3 px-4 font-medium">{{ tr("jobs.th.duration") }}</th>
+              <th class="py-3 px-4 font-medium">{{ tr("common.status") }}</th>
+              <th class="py-3 px-4 font-medium">{{ tr("assets.detail.th.rating") }}</th>
+              <th class="py-3 px-4 font-medium">{{ tr("assets.detail.th.description") }}</th>
+              <th class="py-3 px-4 font-medium">{{ tr("jobs.th.time") }}</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-[#20232d]">
+            {% for r in records %}
+            <tr class="hover:bg-[#181b24]/50 transition">
+              <td class="py-3.5 px-4 text-zinc-200">{{ r.predicted_tag or tr("assets.detail.none") }}</td>
+              <td class="num py-3.5 px-4 font-mono tabular-nums text-zinc-300">{{ "%.2f"|format(r.confidence) if r.confidence is not none else "" }}</td>
+              <td class="py-3.5 px-4 text-zinc-300">{{ r.source }}</td>
+              <td class="num py-3.5 px-4 font-mono tabular-nums text-zinc-300">{{ r.job_id if r.job_id is not none else "" }}</td>
+              <td class="py-3.5 px-4 text-zinc-400 text-xs font-mono">{{ r.model or "" }}</td>
+              <td class="num py-3.5 px-4 font-mono tabular-nums text-zinc-400 text-xs">
+                {% if r.usage %}
+                {{ r.usage.get("prompt_tokens", "?") }}/{{ r.usage.get("completion_tokens", "?") }}
+                {% endif %}
+              </td>
+              <td class="num py-3.5 px-4 font-mono tabular-nums text-zinc-400 text-xs">{{ r.duration_ms if r.duration_ms is not none else "" }}{% if r.duration_ms is not none %}ms{% endif %}</td>
+              <td class="py-3.5 px-4">
+                {% if r.status == "ok" %}
+                <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-mono bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">ok</span>
+                {% elif r.status == "refused" %}
+                <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-mono bg-amber-500/10 text-amber-300 border border-amber-500/20">refused</span>
+                {% else %}
+                <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-mono bg-rose-500/10 text-rose-400 border border-rose-500/20">error</span>
+                {% endif %}
+              </td>
+              <td class="num py-3.5 px-4 font-mono tabular-nums text-zinc-300">{{ r.rating if r.rating is not none else "" }}</td>
+              <td class="py-3.5 px-4 text-zinc-300 text-xs">{{ r.description or tr("assets.detail.none") }}</td>
+              <td class="num py-3.5 px-4 font-mono tabular-nums text-zinc-400 text-xs"><span data-utc="{{ r.created_at }}">{{ r.created_at }}</span></td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    {% else %}
+    <div class="rounded border border-dashed border-[#20232d] bg-[#13151c]/50 p-8 text-center text-sm text-zinc-400">
+      {{ tr("assets.detail.empty") }}
+    </div>
+    {% endif %}
+  </section>
 
-  <!-- 人工改判表单 -->
+  <!-- ④ 人工改判表单 -->
   <section class="rounded bg-[#13151c] border border-[#20232d] p-6 space-y-4">
     <div>
       <h2 class="text-base font-semibold text-zinc-100">{{ tr("assets.detail.override_title") }}</h2>
@@ -139,64 +159,18 @@
     <div id="override-result" class="mt-4"></div>
   </section>
 
-  <!-- 分类历史表格 -->
-  <section class="space-y-3.5">
-    <h2 class="text-base font-semibold text-zinc-100">{{ tr("assets.detail.history") }}</h2>
-    {% if records %}
-    <div class="rounded border border-[#20232d] bg-[#13151c] overflow-hidden">
-      <div class="overflow-x-auto">
-        <table class="w-full text-sm text-left">
-          <thead class="bg-[#181b24]/80 text-zinc-400 font-mono text-xs border-b border-[#20232d]">
-            <tr>
-              <th class="py-3 px-4 font-medium">{{ tr("assets.detail.th.predicted") }}</th>
-              <th class="py-3 px-4 font-medium">{{ tr("assets.detail.th.confidence") }}</th>
-              <th class="py-3 px-4 font-medium">{{ tr("jobs.detail.th.source") }}</th>
-              <th class="py-3 px-4 font-medium">{{ tr("assets.detail.th.job") }}</th>
-              <th class="py-3 px-4 font-medium">{{ tr("assets.detail.th.model") }}</th>
-              <th class="py-3 px-4 font-medium">{{ tr("assets.detail.th.tokens") }}</th>
-              <th class="py-3 px-4 font-medium">{{ tr("jobs.th.duration") }}</th>
-              <th class="py-3 px-4 font-medium">{{ tr("common.status") }}</th>
-              <th class="py-3 px-4 font-medium">{{ tr("jobs.th.time") }}</th>
-            </tr>
-          </thead>
-          <tbody class="divide-y divide-[#20232d]">
-            {% for r in records %}
-            <tr class="hover:bg-[#181b24]/50 transition">
-              <td class="py-3.5 px-4 text-zinc-200">{{ r.predicted_tag or tr("assets.detail.none") }}</td>
-              <td class="num py-3.5 px-4 font-mono tabular-nums text-zinc-300">{{ "%.2f"|format(r.confidence) if r.confidence is not none else "" }}</td>
-              <td class="py-3.5 px-4 text-zinc-300">{{ r.source }}</td>
-              <td class="num py-3.5 px-4 font-mono tabular-nums text-zinc-300">{{ r.job_id if r.job_id is not none else "" }}</td>
-              <td class="py-3.5 px-4 text-zinc-400 text-xs font-mono">{{ r.model or "" }}</td>
-              <td class="num py-3.5 px-4 font-mono tabular-nums text-zinc-400 text-xs">
-                {% if r.usage %}
-                {{ r.usage.get("prompt_tokens", "?") }}/{{ r.usage.get("completion_tokens", "?") }}
-                {% endif %}
-              </td>
-              <td class="num py-3.5 px-4 font-mono tabular-nums text-zinc-400 text-xs">{{ r.duration_ms if r.duration_ms is not none else "" }}{% if r.duration_ms is not none %}ms{% endif %}</td>
-              <td class="py-3.5 px-4">
-                {% if r.status == "ok" %}
-                <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-mono bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">ok</span>
-                {% elif r.status == "refused" %}
-                <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-mono bg-amber-500/10 text-amber-300 border border-amber-500/20">refused</span>
-                {% else %}
-                <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-mono bg-rose-500/10 text-rose-400 border border-rose-500/20">error</span>
-                {% endif %}
-              </td>
-              <td class="num py-3.5 px-4 font-mono tabular-nums text-zinc-400 text-xs"><span data-utc="{{ r.created_at }}">{{ r.created_at }}</span></td>
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-      </div>
-    </div>
-    {% else %}
-    <div class="rounded border border-dashed border-[#20232d] bg-[#13151c]/50 p-8 text-center text-sm text-zinc-400">
-      {{ tr("assets.detail.empty") }}
-    </div>
-    {% endif %}
+  <!-- ⑤ 原始多模态返回折叠区 -->
+  {% if records and records[0].raw_response %}
+  <section class="space-y-3">
+    <h2 class="text-base font-semibold text-zinc-100">{{ tr("assets.detail.raw_title") }}</h2>
+    <details class="rounded border border-[#20232d] bg-[#13151c] overflow-hidden">
+      <summary class="cursor-pointer px-4 py-3 text-sm text-zinc-300 hover:text-white transition">{{ tr("assets.detail.raw_summary") }}</summary>
+      <pre class="overflow-x-auto border-t border-[#20232d] p-4 text-xs font-mono text-zinc-300 leading-relaxed bg-[#0d0f14]">{{ records[0].raw_response }}</pre>
+    </details>
   </section>
+  {% endif %}
 
-  <!-- LLM 输入参数折叠区 -->
+  <!-- ⑥ LLM 输入参数折叠区 -->
   {% if records and records[0].llm_request %}
   {% set req = records[0].llm_request %}
   <section class="space-y-3">
@@ -235,16 +209,74 @@
   </section>
   {% endif %}
 
-  <!-- 原始返回折叠区 -->
-  {% if records and records[0].raw_response %}
-  <section class="space-y-3">
-    <h2 class="text-base font-semibold text-zinc-100">{{ tr("assets.detail.raw_title") }}</h2>
-    <details class="rounded border border-[#20232d] bg-[#13151c] overflow-hidden">
-      <summary class="cursor-pointer px-4 py-3 text-sm text-zinc-300 hover:text-white transition">{{ tr("assets.detail.raw_summary") }}</summary>
-      <pre class="overflow-x-auto border-t border-[#20232d] p-4 text-xs font-mono text-zinc-300 leading-relaxed bg-[#0d0f14]">{{ records[0].raw_response }}</pre>
-    </details>
+  <!-- ⑦ 快捷操作（同步 / 重分类 / 复核 / 取消改判）—— 放在页面最下方 -->
+  <section class="rounded bg-[#13151c] border border-[#20232d] p-5 space-y-4">
+    <h2 class="text-xs font-semibold uppercase tracking-wider text-zinc-400 font-mono">{{ tr("assets.detail.actions_title") }}</h2>
+    <div class="flex flex-wrap items-center gap-3">
+      <form hx-post="/assets/{{ asset_id }}/sync" hx-target="#sync-result" hx-swap="innerHTML">
+        <button type="submit"
+                class="px-4 py-2 rounded bg-[#181b24] hover:bg-[#202430] active:scale-[0.98] border border-[#20232d] text-sm font-medium text-zinc-200 transition">
+          {{ tr("assets.detail.sync") }}
+        </button>
+      </form>
+
+      <div x-data="{ confirmOpen: false }">
+        <button type="button" @click="confirmOpen = true"
+                class="px-4 py-2 rounded bg-[#5e6ad2] hover:bg-[#6f7be8] active:scale-[0.98] text-sm font-medium text-white transition shadow-sm">
+          {{ tr("assets.detail.reclassify") }}
+        </button>
+        <div x-show="confirmOpen" x-cloak
+             class="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm px-4"
+             role="dialog" aria-modal="true">
+          <div class="w-full max-w-sm rounded bg-[#13151c] border border-[#20232d] p-6 shadow-2xl">
+            <h2 class="mb-2 text-base font-semibold text-zinc-100">{{ tr("assets.detail.reclassify") }}</h2>
+            <p class="mb-5 text-sm text-zinc-300">{{ tr("assets.detail.reclassify_body") }}{% if state and state.manual_override %}{{ tr("assets.detail.reclassify_body2") }}{% endif %}{{ tr("assets.detail.reclassify_body3") }}</p>
+            <div class="flex justify-end gap-3">
+              <button type="button" @click="confirmOpen = false"
+                      class="px-4 py-2 rounded bg-[#181b24] hover:bg-[#202430] border border-[#20232d] text-sm text-zinc-300 font-medium transition">{{ tr("config.common.cancel") }}</button>
+              <form method="post" action="/assets/{{ asset_id }}/reclassify" class="inline">
+                <button type="submit"
+                        class="px-4 py-2 rounded bg-[#5e6ad2] hover:bg-[#6f7be8] text-sm font-medium text-white transition shadow-sm">{{ tr("assets.detail.confirm_rerun") }}</button>
+              </form>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div x-data="{ confirmOpen: false }" class="flex items-center gap-3">
+        <form hx-post="/assets/{{ asset_id }}/review" hx-target="#review-result" hx-swap="innerHTML">
+          <button type="submit"
+                  class="px-4 py-2 rounded bg-[#181b24] hover:bg-[#202430] active:scale-[0.98] border border-[#20232d] text-sm font-medium text-zinc-200 transition">
+            {% if state and state.reviewed %}{{ tr("assets.review.unmark") }}{% else %}{{ tr("assets.review.mark") }}{% endif %}
+          </button>
+        </form>
+        {% if state and state.manual_override %}
+        <button type="button" @click="confirmOpen = true"
+                class="px-4 py-2 rounded bg-amber-500/10 hover:bg-amber-500/20 active:scale-[0.98] border border-amber-500/30 text-sm font-medium text-amber-300 transition">
+          {{ tr("assets.detail.cancel_override") }}
+        </button>
+        <div x-show="confirmOpen" x-cloak
+             class="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm px-4"
+             role="dialog" aria-modal="true">
+          <div class="w-full max-w-sm rounded bg-[#13151c] border border-[#20232d] p-6 shadow-2xl">
+            <h2 class="mb-2 text-base font-semibold text-zinc-100">{{ tr("assets.detail.override_clear_title") }}</h2>
+            <p class="mb-5 text-sm text-zinc-300">{{ tr("assets.detail.override_clear_body") }}</p>
+            <div class="flex justify-end gap-3">
+              <button type="button" @click="confirmOpen = false"
+                      class="px-4 py-2 rounded bg-[#181b24] hover:bg-[#202430] border border-[#20232d] text-sm text-zinc-300 font-medium transition">{{ tr("common.back") }}</button>
+              <button type="button" @click="confirmOpen = false"
+                      hx-post="/assets/{{ asset_id }}/override/clear" hx-target="#review-result" hx-swap="innerHTML"
+                      class="px-4 py-2 rounded bg-amber-500 hover:bg-amber-400 text-sm font-medium text-zinc-950 transition">{{ tr("assets.detail.confirm_override_clear") }}</button>
+            </div>
+          </div>
+        </div>
+        {% endif %}
+      </div>
+    </div>
+
+    <div id="sync-result"></div>
+    <div id="review-result"></div>
   </section>
-  {% endif %}
 
 </div>
 {% endblock %}

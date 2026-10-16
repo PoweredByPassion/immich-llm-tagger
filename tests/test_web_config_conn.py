@@ -429,15 +429,22 @@ def test_llm_models_not_configured_when_base_url_empty(client, monkeypatch):
 
 
 def test_llm_form_has_fetch_models_controls(client):
-    """模型输入带 datalist；含获取按钮与静默提示位；i18n key 已解析（非裸 key）。"""
+    """模型输入配真下拉（非 datalist）+ 获取按钮 + 静默提示位；i18n key 已解析。
+
+    回归：曾用 <datalist>，浏览器按输入框已有内容做前缀过滤，已填 model 时
+    下拉只剩一条（表现为"必须清空才能选别的"）。改为独立 <select
+    id="model-picker"> 后才列全部模型。
+    """
     c, _ = client
     html = c.get("/config/llm").text
-    assert 'list="model-options"' in html
-    assert '<datalist id="model-options">' in html
+    assert '<select id="model-picker"' in html
+    assert '<datalist id="model-options">' not in html
+    assert 'list="model-options"' not in html
     assert 'onclick="fetchModels(this)"' in html
     assert 'id="model-fetch-hint"' in html
     assert "获取模型列表" in html  # 默认 zh 文案，非裸 key
     assert "config.llm.fetch_models" not in html
+    assert "config.llm.model_picker" not in html
 
 
 # ---------------------------------------------------------- multimodal 勾选
@@ -537,7 +544,7 @@ def test_recognition_not_configured(client):
 
 
 def test_llm_form_shows_thumb_settings(client):
-    """LLM 配置页渲染缩略图尺寸/质量（settings 默认 large/85）。"""
+    """LLM 配置页渲染缩略图尺寸/质量（settings 默认 large/95）。"""
     c, _ = client
     resp = c.get("/config/llm")
     assert resp.status_code == 200

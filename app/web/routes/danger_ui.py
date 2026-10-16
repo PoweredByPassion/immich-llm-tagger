@@ -8,7 +8,11 @@ from __future__ import annotations
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from app.classify.reset_ops import reset_preview
+from app.classify.reset_ops import (
+    _RESET_DIMENSIONS,
+    reset_preview,
+    reset_preview_counts,
+)
 from app.clients.immich import ImmichClient, ImmichError
 from app.store.connections import ConnectionStore
 from app.store.jobs import create_job, has_active_job
@@ -45,7 +49,8 @@ def _page(request: Request, *, error: str | None = None):
         request,
         "danger.html",
         {"unarchive_count": unarchive_count, "tag_names": tag_names,
-         "error": error, "has_active": has_active_job(db)},
+         "error": error, "has_active": has_active_job(db),
+         "preview_counts": reset_preview_counts(db)},
     )
 
 
@@ -59,19 +64,26 @@ async def danger_reset(request: Request):
     lang = lang_from_cookie(request.cookies)
     db = _db(request)
     form = await request.form()
-    if str(form.get("confirm") or "").strip() != "RESET":
-        return _error_422(request, t("danger.confirm_word_wrong", lang))
+    # 双重确认（D12）：两层都要过。先查确认词，再查勾选。
+    for field in ("confirm", "confirm2"):
+        if str(form.get(field) or "").strip() != "RESET":
+            return _error_422(request, t("danger.confirm_word_wrong", lang))
+    dims = {d for d in form.getlist("dimensions") if d in _RESET_DIMENSIONS}
+    if not dims:
+        return _error_422(request, t("danger.no_dimension", lang))
     if has_active_job(db):
         return _error_422(request, t("danger.job_active", lang))
-    job_id = create_job(db, "reset", params={})
+    job_id = create_job(db, "reset", params={"dimensions": sorted(dims)})
     return RedirectResponse(f"/jobs/{job_id}", status_code=303)
 
 
 def _error_422(request: Request, message: str) -> HTMLResponse:
+    db = _db(request)
     return _templates(request).TemplateResponse(
         request,
         "danger.html",
         {"unarchive_count": 0, "tag_names": [], "error": message,
-         "has_active": has_active_job(_db(request))},
+         "has_active": has_active_job(db),
+         "preview_counts": reset_preview_counts(db)},
         status_code=422,
     )

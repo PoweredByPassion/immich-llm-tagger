@@ -28,6 +28,7 @@ def write_changes_and_state(
     current_tag: str,
     current_markers: list[str],
     visibility: str,
+    rating=None, description=None,
 ) -> None:
     """在调用方的事务里写 change_log 并 upsert asset_state。
 
@@ -45,17 +46,19 @@ def write_changes_and_state(
         )
     conn.execute(
         "INSERT INTO asset_state (asset_id, current_tag, current_markers, "
-        "                        visibility, last_job_id) "
-        "VALUES (:aid, :tag, :markers, :vis, :job_id) "
+        "                        visibility, rating, description, last_job_id) "
+        "VALUES (:aid, :tag, :markers, :vis, :rating, :desc, :job_id) "
         "ON CONFLICT(asset_id) DO UPDATE SET "
         "  current_tag = excluded.current_tag, "
         "  current_markers = excluded.current_markers, "
         "  visibility = excluded.visibility, "
+        "  rating = excluded.rating, "
+        "  description = excluded.description, "
         "  last_job_id = excluded.last_job_id, "
         "  updated_at = datetime('now')",
         {"aid": asset_id, "tag": current_tag,
          "markers": json.dumps(current_markers), "vis": visibility,
-         "job_id": job_id},
+         "rating": rating, "desc": description, "job_id": job_id},
     )
 
 
@@ -67,20 +70,36 @@ _RECORD_FIELDS = (
     "r.id, r.asset_id, r.job_id, r.prompt_version_id, r.source, "
     "r.predicted_tag, r.confidence, r.markers, r.model, r.usage, "
     "r.duration_ms, r.status, r.raw_response, r.dry_run, r.created_at, "
-    "r.applied_at, r.llm_request, r.filename, "
-    "s.current_tag AS current_tag, s.visibility AS visibility"
+    "r.applied_at, r.llm_request, r.filename, r.rating, r.description, "
+    "s.current_tag AS current_tag, s.visibility AS visibility, "
+    "s.apply_attempts AS apply_attempts"
 )
 
 
 def _record_filters(
     *, status: str | None, tag: str | None, current_tag: str | None,
     source: str | None, job_id: int | None, dry_run: int | None = None,
+    include_unapplied: bool = False,
 ) -> tuple[str, dict]:
     """构造 WHERE 片段；tag 走 predicted_tag（历史），current_tag 走
     LEFT JOIN asset_state（本地快照，可能不存在）。dry_run: None=全部，
-    1=沙盒，0=正式。"""
+    1=沙盒，0=正式。
+
+    include_unapplied 只在 status="error" 时放宽：apply 失败但仍在重试的
+    记录 status 仍是 'ok'，失败由 applied_at IS NULL 表达（下轮 scan 重试），
+    故一并纳入。status="ok" 保持原语义（"分析成功"），不被悄悄改掉。
+
+    **dry_run = 0 这个附加条件不在任务书的 SQL 块里，是必要的修正**：沙盒
+    (dry_run=1) 记录从不写 applied_at（_write_record 不写，_mark_applied 只
+    覆盖 dry_run=0），因此「ok + applied_at IS NULL」会命中每一条成功的
+    dryrun 记录，让 dryrun 任务详情页把它们全列成"失败清单"。只有真实 apply
+    才会失败重试，故限定 dry_run=0。
+    """
     where, params = ["1=1"], {}
-    if status is not None:
+    if status is not None and include_unapplied and status == "error":
+        where.append("(r.status = 'error' OR (r.status = 'ok' "
+                     "AND r.applied_at IS NULL AND r.dry_run = 0))")
+    elif status is not None:
         where.append("r.status = :status")
         params["status"] = status
     if tag is not None:
@@ -113,16 +132,20 @@ def query_records(
     db: Database, *, status: str | None = None, tag: str | None = None,
     current_tag: str | None = None, source: str | None = None,
     job_id: int | None = None, dry_run: int | None = None,
+    include_unapplied: bool = False,
     limit: int = 50, offset: int = 0,
 ) -> list[dict]:
     """列表页主查询，id DESC。markers/usage 是 JSON TEXT，返回 dict
     （markers 解析为 list，usage 解析为 dict 或 None）；current_tag/
-    visibility 来自 LEFT JOIN asset_state，无 state 行时为 None。"""
+    visibility 来自 LEFT JOIN asset_state，无 state 行时为 None。
+
+    include_unapplied=True 且 status="error" 时把「apply 失败待重试」的
+    ok 记录（applied_at IS NULL）一并列出；见 _record_filters。"""
     if limit <= 0:
         return []
     where, params = _record_filters(
         status=status, tag=tag, current_tag=current_tag, source=source,
-        job_id=job_id, dry_run=dry_run)
+        job_id=job_id, dry_run=dry_run, include_unapplied=include_unapplied)
     params["limit"] = limit
     params["offset"] = offset
     with db.connect() as conn:
@@ -139,11 +162,13 @@ def count_records(
     db: Database, *, status: str | None = None, tag: str | None = None,
     current_tag: str | None = None, source: str | None = None,
     job_id: int | None = None, dry_run: int | None = None,
+    include_unapplied: bool = False,
 ) -> int:
-    """与 query_records 同筛选的 COUNT(*)，供分页。"""
+    """与 query_records 同筛选的 COUNT(*)，供分页。
+    include_unapplied 必须与 query_records 同步透传，否则总数与列表对不上。"""
     where, params = _record_filters(
         status=status, tag=tag, current_tag=current_tag, source=source,
-        job_id=job_id, dry_run=dry_run)
+        job_id=job_id, dry_run=dry_run, include_unapplied=include_unapplied)
     with db.connect() as conn:
         row = conn.execute(
             f"SELECT COUNT(*) AS n FROM asset_records r "
@@ -162,6 +187,26 @@ def current_tag_counts(db: Database) -> dict[str, int]:
             "GROUP BY current_tag"
         ).fetchall()
     return {row["current_tag"]: row["n"] for row in rows}
+
+
+def in_flight_assets(db: Database, *, limit: int = 24) -> list[dict]:
+    """此刻正在被 worker 分类的资产（活租约未过期）。
+
+    「正在识别」= asset_state.lease_owner 非空且 lease_expires_at > now
+    （见 app/classify/lease.py）。这些图还没有 asset_records 行，因此不在
+    记录列表里 —— 列表页单独取一小组展示，让用户看到"正在跑"。
+    租约过期（worker 崩了）的会自动被排除，不会长期挂着误导用户。
+    """
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT asset_id, current_tag FROM asset_state "
+            " WHERE lease_owner IS NOT NULL "
+            "   AND lease_expires_at IS NOT NULL "
+            "   AND lease_expires_at > datetime('now') "
+            " ORDER BY updated_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def get_record(db: Database, record_id: int) -> dict | None:
@@ -223,3 +268,36 @@ def count_changes_for_job(db: Database, job_id: int) -> tuple[int, int]:
             (job_id,),
         ).fetchone()
     return row["n"], row["a"]
+
+
+def last_written_value(db: Database, asset_id: str, action: str) -> object | None:
+    """本系统最近一次 apply 写入某字段的 new 值（判定"是否我们自己写的"）。
+    找不到记录返回 None。payload 解析失败按 None 处理。"""
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT payload FROM change_log "
+            " WHERE asset_id = ? AND action = ? AND direction = 'apply' "
+            " ORDER BY id DESC LIMIT 1",
+            (asset_id, action),
+        ).fetchone()
+    if row is None:
+        return None
+    try:
+        return json.loads(row["payload"]).get("new")
+    except (TypeError, ValueError):
+        return None
+
+
+def bumped_apply_attempts(db: Database, asset_id: str) -> int:
+    """apply_attempts += 1 并返回新值（无 state 行则建行）。"""
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO asset_state (asset_id, apply_attempts) VALUES (:aid, 1) "
+            "ON CONFLICT(asset_id) DO UPDATE SET "
+            "  apply_attempts = apply_attempts + 1, updated_at = datetime('now')",
+            {"aid": asset_id},
+        )
+        row = conn.execute(
+            "SELECT apply_attempts FROM asset_state WHERE asset_id = ?", (asset_id,)
+        ).fetchone()
+    return int(row["apply_attempts"])

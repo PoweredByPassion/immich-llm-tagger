@@ -109,10 +109,10 @@
             <div class="ml-6 border-l border-[#20232d] pl-3 py-1 space-y-0.5 {% if request and request.url.path.startswith('/config') %}{% else %}hidden{% endif %}">
               <a href="/config/immich" class="block py-1 text-xs {% if request and request.url.path == '/config/immich' %}text-[#8f9bff] font-medium{% else %}text-zinc-500 hover:text-zinc-300{% endif %}">{{ tr("config.nav.immich") }}</a>
               <a href="/config/llm" class="block py-1 text-xs {% if request and request.url.path == '/config/llm' %}text-[#8f9bff] font-medium{% else %}text-zinc-500 hover:text-zinc-300{% endif %}">{{ tr("config.nav.llm") }}</a>
-              <a href="/config/poll" class="block py-1 text-xs {% if request and request.url.path == '/config/poll' %}text-[#8f9bff] font-medium{% else %}text-zinc-500 hover:text-zinc-300{% endif %}">{{ tr("config.nav.poll") }}</a>
+              <a href="/config/webhook" class="block py-1 text-xs {% if request and request.url.path == '/config/webhook' %}text-[#8f9bff] font-medium{% else %}text-zinc-500 hover:text-zinc-300{% endif %}">{{ tr("config.nav.webhook") }}</a>
+              <a href="/config/poll" class="block py-1 text-xs {% if request and request.url.path == '/config/poll' %}text-[#8f9bff] font-medium{% else %}text-zinc-500 hover:text-zinc-300{% endif %}">{{ tr("config.nav.recognition") }}</a>
               <a href="/config/scope" class="block py-1 text-xs {% if request and request.url.path == '/config/scope' %}text-[#8f9bff] font-medium{% else %}text-zinc-500 hover:text-zinc-300{% endif %}">{{ tr("config.nav.scope") }}</a>
               <a href="/config/tags" class="block py-1 text-xs {% if request and request.url.path == '/config/tags' %}text-[#8f9bff] font-medium{% else %}text-zinc-500 hover:text-zinc-300{% endif %}">{{ tr("config.nav.tags") }}</a>
-              <a href="/config/exclusions" class="block py-1 text-xs {% if request and request.url.path == '/config/exclusions' %}text-[#8f9bff] font-medium{% else %}text-zinc-500 hover:text-zinc-300{% endif %}">{{ tr("config.nav.exclusions") }}</a>
               <a href="/config/markers" class="block py-1 text-xs {% if request and request.url.path == '/config/markers' %}text-[#8f9bff] font-medium{% else %}text-zinc-500 hover:text-zinc-300{% endif %}">{{ tr("config.nav.markers") }}</a>
               <a href="/config/prompt" class="block py-1 text-xs {% if request and request.url.path == '/config/prompt' %}text-[#8f9bff] font-medium{% else %}text-zinc-500 hover:text-zinc-300{% endif %}">{{ tr("config.nav.prompt") }}</a>
             </div>

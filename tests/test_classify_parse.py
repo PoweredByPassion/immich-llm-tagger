@@ -298,3 +298,43 @@ class TestMarkerBoundary:
             marker_rules=[("low_confidence", {"confidence_lt": 0.6})],
         )
         assert c.markers == ()
+
+
+# ---------------------------------------------------------------------------
+# normalize: rating / description（Task 4 解析层扩展）
+# ---------------------------------------------------------------------------
+
+class TestNormalizeRatingDescription:
+    def test_normalize_reads_rating_and_description(self):
+        from app.classify.parse import normalize
+        cls = normalize({"tag": "cat", "confidence": 0.9, "rating": 4,
+                         "description": "  一只猫在窗台  "},
+                        refusal_text=None, enabled_primary_tags={"cat"},
+                        fallback_tag="other", marker_rules=[])
+        assert cls.rating == 4
+        assert cls.description == "一只猫在窗台"       # 已 strip
+
+    def test_normalize_rejects_invalid_rating(self):
+        from app.classify.parse import normalize
+        for bad in (0, 6, -1, "4", 3.5, True):
+            cls = normalize({"tag": "cat", "rating": bad}, refusal_text=None,
+                            enabled_primary_tags={"cat"}, fallback_tag="other",
+                            marker_rules=[])
+            assert cls.rating is None, bad
+
+    def test_normalize_blank_description_is_none(self):
+        from app.classify.parse import normalize
+        for blank in ("", "   ", None, 123):
+            cls = normalize({"tag": "cat", "description": blank}, refusal_text=None,
+                            enabled_primary_tags={"cat"}, fallback_tag="other",
+                            marker_rules=[])
+            assert cls.description is None, blank
+
+    def test_missing_fields_do_not_change_status_inputs(self):
+        """缺 rating/description 不得影响 tag/confidence（契约扩字段是向后兼容的）。"""
+        from app.classify.parse import normalize
+        cls = normalize({"tag": "cat", "confidence": 0.8}, refusal_text=None,
+                        enabled_primary_tags={"cat"}, fallback_tag="other",
+                        marker_rules=[])
+        assert (cls.tag, cls.confidence) == ("cat", 0.8)
+        assert cls.rating is None and cls.description is None
