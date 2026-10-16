@@ -37,7 +37,7 @@ from app.clients.immich import ImmichError
 from app.db.connection import Database
 from app.store import events, jobs
 from app.store.connections import ConnectionStore
-from app.store.settings import SettingsStore
+from app.store.settings import SettingsStore, resolve_skip_marker_tag_name
 from app.store.tags import load_tags
 
 # 内置默认模板；active_prompt_version_id
@@ -107,6 +107,9 @@ def build_pipeline_config(db: Database) -> PipelineConfig:
         queue_tag_name=settings.get("queue_tag_name"),
         llm=conns.get_llm(),
         concurrency_owner=_owner_id(db),
+        enabled_effects=frozenset(settings.get("enabled_effects")),
+        skip_marker_tag_name=resolve_skip_marker_tag_name(settings),
+        apply_max_attempts=int(settings.get("apply_max_attempts")),
     )
 
 

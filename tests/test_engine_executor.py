@@ -24,6 +24,7 @@ from app.engine.executor import (
     run_single_job,
 )
 from app.store import events, jobs
+from app.store.settings import SettingsStore
 from app.store.tags import TagDef
 
 # --------------------------------------------------------------- fixtures
@@ -1541,3 +1542,28 @@ def test_already_done_true_when_retries_exhausted(db: Database) -> None:
         conn.execute("INSERT INTO asset_state (asset_id, apply_attempts) "
                      "VALUES ('a1', 3)")
     assert _already_done(db, "a1") is True
+
+
+# --------------------------------------- Effectors: pipeline config（Task 15）
+
+
+def test_pipeline_config_carries_effect_settings(db: Database) -> None:
+    """非默认值：只有 build_pipeline_config 真的读了 settings 才可能通过。"""
+    settings = SettingsStore(db)
+    settings.set("enabled_effects", ["tag", "rating"])
+    settings.set("apply_max_attempts", 7)
+    settings.set("skip_marker_tag_name", "我改过的名字")
+
+    cfg = build_pipeline_config(db)
+    assert cfg.enabled_effects == {"tag", "rating"}
+    assert cfg.apply_max_attempts == 7
+    assert cfg.skip_marker_tag_name == "我改过的名字"
+
+
+def test_pipeline_config_effect_defaults(db: Database) -> None:
+    """未配置时的兜底：全开 + 上限 3 + 按 zh 解析标记名。"""
+    cfg = build_pipeline_config(db)
+    assert cfg.enabled_effects == {"tag", "visibility", "album",
+                                   "rating", "description"}
+    assert cfg.apply_max_attempts == 3
+    assert cfg.skip_marker_tag_name == "保留人工信息"
