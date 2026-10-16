@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from pathlib import Path
 
@@ -813,3 +814,93 @@ def test_list_renders_lightbox_hooks(client):
     assert "openLightbox" in html
     assert f'data-asset-id="{ASSET_ID}"' in html
 
+
+# ---------------------------------------- Immich 深链（列表右上角 / 详情跳转）
+
+def test_list_card_links_to_immich_when_configured(client):
+    """配好 Immich 后每张卡片右上角给出 {server}/photos/{id} 新标签跳转。"""
+    c, db = client
+    ConnectionStore(db).set_immich(
+        ImmichConn(url="http://immich.example:2283/", api_key="k")
+    )
+    _insert_record(db, ASSET_ID)
+    html = c.get("/assets").text
+    assert f'href="http://immich.example:2283/photos/{ASSET_ID}"' in html
+    assert 'target="_blank"' in html
+    assert 'rel="noopener noreferrer"' in html
+
+
+def test_list_card_no_immich_link_when_unconfigured(client):
+    """未配 Immich 时不渲染跳转（避免死链）。"""
+    c, db = client
+    _insert_record(db, ASSET_ID)
+    html = c.get("/assets").text
+    assert "/photos/" not in html
+
+
+def test_detail_shows_preview_and_immich_link(client):
+    c, db = client
+    ConnectionStore(db).set_immich(
+        ImmichConn(url="http://immich.example:2283", api_key="k")
+    )
+    _insert_record(db, ASSET_ID)
+    html = c.get(f"/assets/{ASSET_ID}").text
+    assert f'src="/assets/{ASSET_ID}/preview"' in html
+    assert f'href="http://immich.example:2283/photos/{ASSET_ID}"' in html
+
+
+def test_detail_no_immich_link_when_unconfigured(client):
+    c, db = client
+    _insert_record(db, ASSET_ID)
+    html = c.get(f"/assets/{ASSET_ID}").text
+    assert "/photos/" not in html
+    assert "尚未配置 Immich 连接" in html
+
+
+def test_detail_section_order_matches_spec(client):
+    """自上而下：状态快照 → 图片/Immich → 分类历史 → 人工改判 → raw → LLM 输入。"""
+    c, db = client
+    _insert_record(
+        db, ASSET_ID,
+        llm_request=json.dumps({"model": "qwen-vl", "max_tokens": 1234,
+                                "messages": []}),
+    )
+    _insert_state(db, ASSET_ID)
+    html = c.get(f"/assets/{ASSET_ID}").text
+    order = [
+        "本地状态快照",
+        "图片预览与 Immich 跳转",
+        "分类历史",
+        "人工改判 (Manual Override)",
+        "原始多模态返回",
+        "LLM 输入参数",
+    ]
+    positions = [html.index(marker) for marker in order]
+    assert positions == sorted(positions), positions
+
+
+def test_detail_quick_actions_below_llm_section(client):
+    """同步/重分类/复核回到最下方（在 LLM 输入参数之后）。"""
+    c, db = client
+    _insert_record(
+        db, ASSET_ID,
+        llm_request=json.dumps({"model": "qwen-vl", "max_tokens": 1234,
+                                "messages": []}),
+    )
+    html = c.get(f"/assets/{ASSET_ID}").text
+    assert html.index("快捷操作") > html.index("LLM 输入参数")
+    assert html.index('hx-post="/assets/%s/sync"' % ASSET_ID) > html.index("快捷操作")
+
+
+def test_detail_new_sections_localized_english(client):
+    """详情页新组件（预览/跳转/快捷操作）在 en 下整段英文，不残留中文。"""
+    c, db = client
+    _insert_record(db, ASSET_ID)
+    html = c.get(f"/assets/{ASSET_ID}", cookies={"lang": "en"}).text
+    # Jinja 自动转义把 & 变成 &amp;
+    assert "Image Preview &amp; Immich Link" in html
+    assert "Quick Actions" in html
+    # 模板里的中文 HTML 注释是代码不是 UI 文案（编排注释会原样输出），先剥掉
+    visible = re.sub(r"<!--.*?-->", "", html, flags=re.S)
+    assert "图片预览" not in visible
+    assert "快捷操作" not in visible

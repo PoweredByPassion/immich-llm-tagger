@@ -450,6 +450,9 @@ _DICTIONARY: dict[str, dict[str, str]] = {
     "assets.detail.llm_summary":     {"zh": "模型 %s · max_tokens %s · 展开 / 折叠完整请求", "en": "Model %s · max_tokens %s · Expand / collapse full request"},
     "assets.detail.raw_title":       {"zh": "原始多模态返回 (Raw LLM Response)", "en": "Raw LLM Response"},
     "assets.detail.raw_summary":     {"zh": "展开 / 折叠响应 JSON", "en": "Expand / collapse response JSON"},
+    "assets.detail.preview_title":   {"zh": "图片预览与 Immich 跳转", "en": "Image Preview & Immich Link"},
+    "assets.detail.preview_failed":  {"zh": "图片加载失败，请检查 Immich 连接配置", "en": "Failed to load the image; check the Immich connection settings"},
+    "assets.detail.actions_title":   {"zh": "快捷操作", "en": "Quick Actions"},
     # --- 图片记录：状态块 / 片段 ---
     "assets.state.title":           {"zh": "本地状态快照", "en": "Local State Snapshot"},
     "assets.state.visibility":      {"zh": "可见性", "en": "Visibility"},
