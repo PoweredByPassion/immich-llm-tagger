@@ -6,7 +6,7 @@ from app.classify.effectors.base import Effect, EffectContext, PlanOutcome, tag_
 
 def plan(ctx: EffectContext, last_written: dict, outcome: PlanOutcome) -> list[Effect]:
     # 同 rating：标签不写描述时直接返回，不记 outcome.skipped。
-    if ctx.gates.metadata_blocked or not tag_writes(ctx, "write_description"):
+    if ctx.gates.rating_description_blocked or not tag_writes(ctx, "write_description"):
         return []
     new = ctx.analysis.description
     if new is None:

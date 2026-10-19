@@ -47,6 +47,32 @@ def _visibility(effects):
     return [e for e in effects if e.action in ("archive", "timeline")]
 
 
+def _tag_names(effects):
+    return [e.payload["tag_name"] for e in effects if e.action == "tag_add"]
+
+
+def test_tags_planned_for_new_asset():
+    effects, _ = _plan(_ctx(analysis=Classification(
+        tag="cat", confidence=0.9, sensitive=True, reason=None,
+        markers=("sensitive",), rating=4, description="x")))
+    assert _tag_names(effects) == ["cat", "sensitive"]
+
+
+def test_tag_already_present_is_not_reapplied():
+    """资产已拥有的标签不再重打。
+
+    Immich 的批量打标端点在"图已有该标签"时返回 success=false / duplicate，
+    整张图的 apply 因此失败（真机事故：拒答图重复打 sensitive → 重试三次后
+    放弃并误打跳过标记）。快照里有 tags，plan 阶段就能判掉。
+    """
+    effects, _ = _plan(_ctx(
+        analysis=Classification(tag="cat", confidence=0.9, sensitive=True,
+                                reason=None, markers=("sensitive",),
+                                rating=4, description="x"),
+        snapshot=AssetSnapshot(tags=("cat", "queue"))))
+    assert _tag_names(effects) == ["sensitive"]
+
+
 def test_rating_written_when_empty():
     effects, _ = _plan()
     assert len(_ratings(effects)) == 1
@@ -124,11 +150,22 @@ def test_gate_manual_override_blocks_metadata():
                 if e.action in ("rating_set", "description_set")]
 
 
-def test_gate_skip_immich_blocks_everything():
-    """skip_immich：连标签都不写（沿用旧 apply 路径的语义），只有队列收尾动 ——
-    而队列收尾由提交器的 Finalizer 负责，不在 Effect 列表里。"""
+def test_gate_skip_immich_keeps_rating_and_description():
+    """「忽略」(skip_immich)：不打标签 / 不进相册 / 不改可见性，但评分与描述照写。
+
+    解耦的理由是实际场景：勾「忽略」的典型是 normal_photo（不想被打标归档的
+    真实照片），而那恰恰是最值得评分的照片。旧实现里 metadata_blocked 连带掐掉了
+    它们 → "忽略"标签永远拿不到评分与描述。
+    """
     effects, _ = _plan(_ctx(gates=Gates(skip_immich=True)))
-    assert effects == []
+    assert [e.action for e in effects] == ["rating_set", "description_set"]
+
+
+def test_gate_skip_immich_still_blocks_tag_album_visibility():
+    effects, _ = _plan(_ctx(archive=True, tag_def=_tag(album="Pets"),
+                            gates=Gates(skip_immich=True)))
+    assert effects == [e for e in effects if e.action in ("rating_set",
+                                                          "description_set")]
 
 
 def test_dry_run_gate_blocks_metadata():

@@ -8,7 +8,7 @@ def plan(ctx: EffectContext, last_written: dict, outcome: PlanOutcome) -> list[E
     # 标签声明不写评分 → 直接返回，**不**记 outcome.skipped：
     # 跳过标记（"保留人工信息"）的语义是"我们自己想写但被你写的值挡住"，
     # 这里压根没打算写，打标记反而误导。
-    if ctx.gates.metadata_blocked or not tag_writes(ctx, "write_rating"):
+    if ctx.gates.rating_description_blocked or not tag_writes(ctx, "write_rating"):
         return []
     new = ctx.analysis.rating
     if new is None:

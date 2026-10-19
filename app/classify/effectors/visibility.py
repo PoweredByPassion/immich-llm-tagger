@@ -5,7 +5,7 @@ from app.classify.effectors.base import Effect, EffectContext
 
 
 def plan(ctx: EffectContext, last_written: dict, has_system_archive: bool = False) -> list[Effect]:
-    if "visibility" not in ctx.enabled or ctx.gates.metadata_blocked:
+    if "visibility" not in ctx.enabled or ctx.gates.organization_blocked:
         return []
     current = ctx.snapshot.visibility
     if ctx.archive:

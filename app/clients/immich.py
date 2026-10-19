@@ -55,6 +55,7 @@ from app.clients._immich_gen.models.asset_media_size import AssetMediaSize
 from app.clients._immich_gen.models.asset_response_dto import AssetResponseDto
 from app.clients._immich_gen.models.asset_stats_response_dto import AssetStatsResponseDto
 from app.clients._immich_gen.models.asset_visibility import AssetVisibility
+from app.clients._immich_gen.models.bulk_id_error_reason import BulkIdErrorReason
 from app.clients._immich_gen.models.bulk_id_response_dto import BulkIdResponseDto
 from app.clients._immich_gen.models.bulk_ids_dto import BulkIdsDto
 from app.clients._immich_gen.models.create_album_dto import CreateAlbumDto
@@ -220,14 +221,23 @@ class ImmichClient:
     # 的返回是逐项结果 [{"id":..., "success": true/false, "error": "duplicate"|"not_found"|...}]。
     # HTTP 200 不代表全部成功 —— 逐项 success=false 必须抛错，否则假成功会让
     # 队列标签永远摘不掉（真机事故：722 条 queue_remove 落日志，25 张图仍挂着标签）。
-    def _check_bulk_results(self, response: Response[Any]) -> None:
+    #
+    # tolerate 是**逐端点**的例外白名单：只有语义上"目标状态已经达成"的错误才可
+    # 放过。打标时 duplicate = 图已经有这个标签（终态已满足）；绝不能把它当成
+    # 通用规则 —— 摘标时放过 not_found 就是上面那起事故的翻版。
+    def _check_bulk_results(self, response: Response[Any], *,
+                            tolerate: frozenset[str] = frozenset()) -> None:
         results: list[BulkIdResponseDto] | None = response.parsed
         if not results:
             return
+
+        def _err(r: BulkIdResponseDto) -> str:
+            return str(getattr(r.error, "value", r.error) or "")
+
         failures = [
-            f"{r.id}: {getattr(r.error, 'value', r.error) or ''}"
+            f"{r.id}: {_err(r)}"
             f"{'' if isinstance(r.error_message, Unset) else f' ({r.error_message})'}"
-            for r in results if not r.success
+            for r in results if not r.success and _err(r) not in tolerate
         ]
         if failures:
             raise ImmichError(
@@ -236,7 +246,11 @@ class ImmichClient:
             )
 
     def tag_assets(self, tag_ids: list[str], asset_ids: list[str]) -> None:
-        """给资产批量打标。任一列表为空即为安全 no-op（不发请求）。"""
+        """给资产批量打标。任一列表为空即为安全 no-op（不发请求）。
+
+        duplicate（该资产本就有这个标签）按成功处理：并发/快照过期时可能撞上，
+        重试只会白烧一轮 apply（三次后放弃并打跳过标记）。
+        """
         if not tag_ids or not asset_ids:
             return
         for tag_id in tag_ids:
@@ -246,7 +260,7 @@ class ImmichClient:
                     _tag_assets.sync_detailed,
                     id=tag_id,
                     body=BulkIdsDto(ids=chunk),
-                ))
+                ), tolerate=frozenset({str(BulkIdErrorReason.DUPLICATE)}))
 
     def delete_tag(self, tag_id: str) -> None:
         """删除标签对象本身（DELETE /tags/{id}）。

@@ -53,13 +53,30 @@ class Gates:
 
     @property
     def blocks_all(self) -> bool:
-        """一个 Effect 都不产出（标签也不写）。"""
+        """标签 / 相册 / 归档一个 Effect 都不产出（队列收尾另算）。"""
         return self.dry_run or self.skip_immich
 
     @property
-    def metadata_blocked(self) -> bool:
-        """评分/描述/可见性/相册是否被禁止写入（标签不受影响）。"""
+    def organization_blocked(self) -> bool:
+        """可见性 / 相册是否被禁止写入（标签看 blocks_all，评分描述看
+        rating_description_blocked）。
+
+        skip_immich（标签级「忽略」）算在内 —— 它的承诺就是"不打标签、不进相册、
+        不改归档"。
+        """
         return self.blocks_all or self.manual_override
+
+    @property
+    def rating_description_blocked(self) -> bool:
+        """评分 / 描述是否被禁止写入：只看 dry_run 与人工改判，**不看 skip_immich**。
+
+        「忽略」的边界是标签 / 相册 / 归档，评分与描述由标签自己的
+        write_rating / write_description 决定（v12）。两者解耦的原因很实际：
+        勾了「忽略」的典型是 normal_photo（不想被系统打标、归档的真实照片），
+        而那恰恰是最值得评分的照片 —— 旧实现里 metadata_blocked 连带掐掉了它们，
+        结果"忽略"标签永远拿不到评分与描述。
+        """
+        return self.dry_run or self.manual_override
 
 
 @dataclass(frozen=True)

@@ -28,7 +28,16 @@ MODELS_PATH = "/v1/models"
 
 
 class LLMError(RuntimeError):
-    """LLM 调用失败（网络错误、非 2xx、或响应无法解析）。"""
+    """LLM 调用失败（网络错误、非 2xx、或响应无法解析）。
+
+    status_code：上游返回的 HTTP 状态码；网络/解析失败时为 None。调用方靠它
+    区分"这张图/这次请求本身有问题"（4xx：参数被拒、图片不被接受，重试无用）
+    与"上游暂时不行"（5xx/429/网络，重试有意义）。
+    """
+
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 @dataclass(frozen=True)
@@ -100,21 +109,24 @@ class LLMClient:
 
             # 429：重试，尊重 retry-after。
             if resp.status_code == 429:
-                last_exc = LLMError(f"LLM 返回 429: {resp.text[:200]}")
+                last_exc = LLMError(f"LLM 返回 429: {resp.text[:200]}",
+                                    status_code=429)
                 if attempt + 1 < retries:
                     time.sleep(self._retry_delay(resp, attempt))
                 continue
 
             # 5xx：指数退避重试。
             if resp.status_code >= 500:
-                last_exc = LLMError(f"LLM 返回 {resp.status_code}: {resp.text[:200]}")
+                last_exc = LLMError(f"LLM 返回 {resp.status_code}: {resp.text[:200]}",
+                                    status_code=resp.status_code)
                 if attempt + 1 < retries:
                     time.sleep(self._backoff(attempt))
                 continue
 
             # 其他 4xx：认证/参数错误，重试无意义，立即失败。
             if resp.status_code >= 400:
-                raise LLMError(f"LLM 返回 {resp.status_code}: {resp.text[:200]}")
+                raise LLMError(f"LLM 返回 {resp.status_code}: {resp.text[:200]}",
+                               status_code=resp.status_code)
 
             return self._parse_chat(resp)
 

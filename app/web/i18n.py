@@ -309,7 +309,7 @@ _DICTIONARY: dict[str, dict[str, str]] = {
     "config.tags.desc_label":    {"zh": "分类判定描述（将注入 Prompt 提示词）", "en": "Classification description (injected into the prompt)"},
     "config.tags.desc_placeholder": {"zh": "详细描述该标签所包含的图片内容特征，用于引导大模型精确判定", "en": "Describe the image content this tag covers, to guide the model's judgment"},
     "config.tags.archive_hint":  {"zh": "归档（命中后放入相册并归档，从主时间线隐去）", "en": "Archive (on match, add to album and archive off the main timeline)"},
-    "config.tags.skip_hint":     {"zh": "忽略（照常识别与记录，但不在 Immich 打标签/进相册/归档，仅移除队列标签）", "en": "Skip (still recognize and log, but do not tag/album/archive in Immich; only remove the queue tag)"},
+    "config.tags.skip_hint":     {"zh": "忽略（照常识别与记录，但不在 Immich 打标签/进相册/归档，仅移除队列标签；不影响评分与描述 —— 那两项由下面两个开关各自控制）", "en": "Skip (still recognize and log, but no tagging/album/archive in Immich and only the queue tag is removed; rating and description are unaffected — those have their own switches below)"},
     "config.tags.write_rating_hint": {"zh": "写入评分（模型给出的 1–5 星；你自己打过的分不会被覆盖）", "en": "Write rating (the model's 1-5 stars; your own rating is never overwritten)"},
     "config.tags.write_description_hint": {"zh": "写入描述（模型给出的一句话描述；你自己写过的不会被覆盖）", "en": "Write description (the model's one-liner; your own description is never overwritten)"},
     "config.tags.write_rating_short":    {"zh": "写评分", "en": "Write rating"},

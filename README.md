@@ -187,6 +187,8 @@ An existing `rating = -1` counts as a value (it is not treated as "unrated") —
 
 **Whether rating and description are written is decided by the tag system** — the same model as *archive* (`archive`), *album* (`album`) and *skip Immich* (`skip_immich`). In **Config → Tags**, every tag has two independent checkboxes, **Write rating** and **Write description** (both on by default). Only assets matching that tag get those fields written; a tag with the box unchecked writes nothing, logs nothing to `change_log`, and does *not* get the skip-marker tag (that marker means "we wanted to write, but your value was in the way" — not "we never intended to write").
 
+**What "Skip" covers**: `skip_immich` blocks **tags / album / archive** only — it does *not* affect rating and description, which have their own switches. So the typical setup is `normal_photo` with *Skip* + *Write rating* + *Write description* checked: your real photos get no tag and no archive, but do get rated and described (which is then the only write that tag performs). To leave a class of images completely untouched in Immich, turn all three off. The rating/description skip rules still respect a manual override.
+
 **What the shipped config does**: archived tags (`screenshot`, `meme`, `junk`) keep the description but skip the rating — archiving means "hide from the main timeline", where a star rating is meaningless, while the description still makes the asset searchable. Every other tag writes both. These are just starting values; change them any time under Tags (e.g. turn the description off for `id_document` to keep sensitive text out of that field).
 
 ### `enabled_effects` (global effectors)

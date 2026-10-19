@@ -573,9 +573,28 @@ def test_untag_assets_item_failure_raises() -> None:
 
 def test_tag_assets_item_failure_raises() -> None:
     rec = Recorder({("PUT", f"/api/tags/{TAG_ID}/assets"):
-                    [_bulk_result(ASSET_ID, False, error="duplicate")]})
+                    [_bulk_result(ASSET_ID, False, error="no_permission")]})
     with pytest.raises(ImmichError, match="部分失败"):
         _client(rec).tag_assets([TAG_ID], [ASSET_ID])
+
+
+def test_tag_assets_duplicate_is_tolerated() -> None:
+    """duplicate = 图本就有这个标签，终态已满足 → 按成功处理。
+
+    真机回归：拒答图重复打 sensitive，duplicate 被当成失败 → apply 重试三次
+    后放弃并打上跳过标记（本该是幂等成功）。
+    """
+    rec = Recorder({("PUT", f"/api/tags/{TAG_ID}/assets"):
+                    [_bulk_result(ASSET_ID, False, error="duplicate")]})
+    _client(rec).tag_assets([TAG_ID], [ASSET_ID])      # 不抛即通过
+
+
+def test_untag_assets_not_found_still_raises() -> None:
+    """白名单只给打标端点：摘标放过 not_found 就是那起假成功事故的翻版。"""
+    rec = Recorder({("DELETE", f"/api/tags/{TAG_ID}/assets"):
+                    [_bulk_result(ASSET_ID, False, error="not_found")]})
+    with pytest.raises(ImmichError, match="not_found"):
+        _client(rec).untag_assets(TAG_ID, [ASSET_ID])
 
 
 def test_add_to_album_item_failure_raises() -> None:

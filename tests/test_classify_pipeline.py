@@ -346,6 +346,93 @@ def test_thumb_failure_error_and_lease_released(db: Database) -> None:
     assert _lease(db)["lease_expires_at"] is None
 
 
+def _events(db: Database, event_type: str) -> list[dict]:
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT payload FROM events WHERE event_type = ? ORDER BY id", (event_type,)
+        ).fetchall()
+    return [json.loads(r["payload"]) for r in rows]
+
+
+def _thumb_404(monkeypatch: pytest.MonkeyPatch) -> None:
+    """让取图抛 ImmichError(404)：0 字节 / media not found 的真实形态。"""
+    def boom(client, asset_id, cfg):
+        raise ImmichError("Asset media not found", status_code=404)
+    monkeypatch.setattr(pipeline_module, "fetch_and_encode", boom)
+
+
+def test_analysis_failure_is_logged_with_reason(
+        db: Database, monkeypatch: pytest.MonkeyPatch) -> None:
+    """分析阶段失败必须留痕：事件里带**错误原因**。
+
+    原先这条路径什么都不记（asset_records 只有 status=error、raw_response 为空），
+    真机上只能看到一个 "classification failed"，坏图只能靠猜。
+    """
+    _thumb_404(monkeypatch)
+    classify_asset(db, FakeClient(), make_llm_ok(), "asset-1", make_cfg(), source="poll")
+
+    got = _events(db, "analysis_failed")
+    assert len(got) == 1
+    assert "Asset media not found" in got[0]["error"]
+    assert got[0]["asset_id"] == "asset-1"
+
+
+def test_unrecoverable_analysis_failure_gives_up_and_tags(
+        db: Database, monkeypatch: pytest.MonkeyPatch) -> None:
+    """读不出来的图（Immich 4xx）：到重试上限就打「识别失败」并标为放弃。
+
+    这张图从此不再被 scan 重跑（_already_done 为真 → 下一次 scan 走 heal 摘掉
+    队列标签），队列不会被它一直占着 —— 但**别的图完全不受影响**。
+    """
+    from app.engine.executor import _already_done
+    from app.store.settings import SettingsStore
+
+    _thumb_404(monkeypatch)
+    client = FakeClient()
+    # cfg 的 cap 与 settings 保持一致（生产里 cfg 就是从 settings 建的，而
+    # _already_done 读的是 settings）
+    SettingsStore(db).set("apply_max_attempts", 2)
+    cfg = make_cfg(marker_rules=[("识别失败", {"on_refusal": True})],
+                   apply_max_attempts=2)
+    for _ in range(2):
+        result = classify_asset(db, client, make_llm_ok(), "asset-1", cfg, source="poll")
+        assert result.status == "error" and result.tag == ""
+
+    assert "识别失败" in client.tagged_names          # 终态标记真打进 Immich
+    assert len(_events(db, "analysis_retry")) == 1     # 第一次还在重试
+    assert len(_events(db, "analysis_gave_up")) == 1   # 第二次到顶
+    # 打标要落账（§5.5 不变式：每次成功写入都有 change_log）
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT payload FROM change_log WHERE asset_id = 'asset-1' "
+            "AND action = 'tag_add' ORDER BY id DESC LIMIT 1").fetchone()
+    assert json.loads(row["payload"])["tag_name"] == "识别失败"
+    assert _already_done(db, "asset-1") is True
+
+
+def test_recoverable_analysis_failure_keeps_retrying(db: Database) -> None:
+    """5xx / 网络这类暂态失败不计数、不判死：上游恢复后这张图还能成功。
+
+    否则一次 LLM 抖动就能把整批图永久判死（每轮 poll 计一次，三轮就放弃）。
+    """
+    from app.clients.llm import LLMError
+
+    llm = FakeLLM([LLMError("LLM 返回 503", status_code=503)] * 3)
+    client = FakeClient()
+    cfg = make_cfg(marker_rules=[("识别失败", {"on_refusal": True})],
+                   apply_max_attempts=2)
+    for _ in range(3):
+        result = classify_asset(db, client, llm, "asset-1", cfg, source="poll")
+        assert result.status == "error"
+
+    assert client.tagged_names == []                   # 没打终态标记
+    with db.connect() as conn:
+        state = conn.execute(
+            "SELECT apply_attempts FROM asset_state WHERE asset_id = 'asset-1'"
+        ).fetchone()
+    assert state is None or state["apply_attempts"] == 0
+
+
 def test_llm_failure_error_and_lease_released(db: Database) -> None:
     """#4 LLM 抛错：status=error、写记录、租约释放。"""
     llm = FakeLLM([RuntimeError("network down")])
@@ -899,7 +986,12 @@ def test_semantics_manual_override_rerun_retags_but_not_visibility_album(
 
 
 def test_skip_immich_tag_no_immich_writes(db: Database) -> None:
-    """skip_immich 标签：识别照常（prompt 含该标签），apply 只摘队列标签。"""
+    """skip_immich 标签：识别照常（prompt 含该标签），不打标/不归档/不进相册。
+
+    评分与描述**不受**「忽略」影响（v12 解耦）：这两个字段由标签自己的
+    write_rating / write_description 控制 —— 否则 normal_photo 这类"忽略"
+    标签（最值得评分的真实照片）永远拿不到评分与描述。
+    """
     tags = [
         StoreTagDef(id=1, name="normal_photo", description="普通照片", kind="primary",
                     enabled=True, archive=False, album=None, min_confidence=None,
@@ -907,7 +999,8 @@ def test_skip_immich_tag_no_immich_writes(db: Database) -> None:
         StoreTagDef(id=2, name="cat", description="a cat", kind="primary",
                     enabled=True, archive=False, album=None, min_confidence=None),
     ]
-    llm = FakeLLM(['{"tag": "normal_photo", "confidence": 0.9}'])
+    llm = FakeLLM([('{"tag": "normal_photo", "confidence": 0.9, '
+                    '"rating": 4, "description": "一只猫"}')])
     client = FakeClient()
     classify_asset(db, client, llm, "asset-1", make_cfg(tags=tags), source="manual")
 
@@ -915,11 +1008,11 @@ def test_skip_immich_tag_no_immich_writes(db: Database) -> None:
     sent = next(c["text"] for c in llm.calls[0][0]["content"] if c["type"] == "text")
     assert "- normal_photo: 普通照片" in sent
 
-    # apply：无打标/相册/归档写，只有摘队列标签
+    # apply：无打标/相册/归档写，只有属性桶（评分+描述）与摘队列标签
     kinds = [c[0] for c in client.write_calls]
     assert "tag_assets" not in kinds
     assert "ensure_album" not in kinds and "add_to_album" not in kinds
-    assert client.set_props_calls == []
+    assert client.set_props_calls == [{"rating": 4, "description": "一只猫"}]
     assert kinds.count("untag_assets") == 1
 
     # asset_records 正常记录分类结果
@@ -929,6 +1022,29 @@ def test_skip_immich_tag_no_immich_writes(db: Database) -> None:
             "WHERE asset_id = 'asset-1'"
         ).fetchone()
     assert rec["predicted_tag"] == "normal_photo" and rec["status"] == "ok"
+
+
+def test_skip_immich_tag_does_not_write_skip_marker(db: Database) -> None:
+    """「忽略」标签下用户手写过评分：跳过该字段，但**不**打「保留人工信息」。
+
+    跳过标记本身是标签写入，忽略标签一个标签都不写；而描述仍要写。
+    """
+    tags = [StoreTagDef(id=1, name="normal_photo", description="普通照片",
+                        kind="primary", enabled=True, archive=False, album=None,
+                        min_confidence=None, skip_immich=True)]
+    client = FakeClient()
+    client.user_rating = 5
+    classify_asset(db, client, FakeLLM([('{"tag": "normal_photo", "confidence": 0.9, '
+                                        '"rating": 4, "description": "一只猫"}')]),
+                   "asset-1", make_cfg(tags=tags), source="manual")
+
+    assert client.tagged_names == []                      # 一个标签都不打
+    assert client.set_props_calls == [{"description": "一只猫"}]
+    with db.connect() as conn:
+        state = conn.execute(
+            "SELECT current_markers FROM asset_state WHERE asset_id = 'asset-1'"
+        ).fetchone()
+    assert json.loads(state["current_markers"]) == []     # 本地镜像也不记没写过的 marker
 
 
 # ------------------------------------- Task 9: effector 接线 + 跳过 + 成功闸门
