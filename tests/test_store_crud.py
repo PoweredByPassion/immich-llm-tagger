@@ -54,6 +54,37 @@ def test_scope_rule_set_enabled_roundtrip(db: Database) -> None:
 
 # ---------- tags ----------
 
+def test_tag_write_flags_default_on_and_roundtrip(db: Database) -> None:
+    """write_rating / write_description（v12）：默认开，可单独关。"""
+    tid = crud.insert_tag(db, name="风景", kind="primary")
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT write_rating, write_description FROM tags WHERE id=?", (tid,)
+        ).fetchone()
+    assert (row["write_rating"], row["write_description"]) == (1, 1)
+
+    crud.update_tag(
+        db, tid, name="风景", kind="primary", description="", archive=False,
+        album=None, min_confidence=None, enabled=True,
+        write_rating=False, write_description=True,
+    )
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT write_rating, write_description FROM tags WHERE id=?", (tid,)
+        ).fetchone()
+    assert (row["write_rating"], row["write_description"]) == (0, 1)
+
+
+def test_load_tags_carries_write_flags(db: Database) -> None:
+    """load_tags 是管线的输入源：漏选这两列 = 标签开关永远读不到。"""
+    from app.store.tags import load_tags
+
+    crud.insert_tag(db, name="风景", kind="primary", write_rating=False)
+    tag = load_tags(db)[0]
+    assert tag.write_rating is False
+    assert tag.write_description is True
+
+
 def test_tag_insert_none_fields_store_null(db: Database) -> None:
     tid = crud.insert_tag(
         db, name="风景", kind="primary",

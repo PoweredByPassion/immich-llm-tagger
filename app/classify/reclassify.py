@@ -50,10 +50,11 @@ def reclassify_asset(
             )
         conn.execute(
             "INSERT INTO asset_state (asset_id, current_tag, current_markers, "
-            "                        last_job_id) "
-            "VALUES (:aid, NULL, '[]', :job_id) "
+            "                        apply_attempts, last_job_id) "
+            "VALUES (:aid, NULL, '[]', 0, :job_id) "
             "ON CONFLICT(asset_id) DO UPDATE SET "
             "  current_tag = NULL, current_markers = '[]', "
+            "  apply_attempts = 0, "
             "  last_job_id = :job_id, updated_at = datetime('now')",
             {"aid": asset_id, "job_id": job_id},
         )
@@ -65,4 +66,5 @@ def reclassify_asset(
         db, client, llm, asset_id, cfg,
         source="manual", dry_run=False, job_id=job_id,
         prompt_version_id=prompt_version_id, override_manual=False,
+        allow_metadata_overwrite=True,
     )

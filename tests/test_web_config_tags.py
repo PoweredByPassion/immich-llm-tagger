@@ -72,6 +72,73 @@ def test_tag_create_empty_strings_become_null(client):
     assert rows[0]["archive"] == 0
 
 
+def test_tag_create_write_flags_default_on_when_form_has_no_marker(client):
+    """不带 write_flags 隐藏位（老表单 / 程序化提交）→ 保持默认「写」。
+
+    这两个开关默认是开的，缺键绝不能解释成"取消勾选"——否则一次不带这俩字段的
+    提交就会把标签静默改成不写评分/描述。
+    """
+    c, db = client
+    resp = c.post("/config/tags", data={"name": "t", "kind": "primary"})
+    assert resp.status_code == 200
+    row = _rows(db, "SELECT write_rating, write_description FROM tags")[0]
+    assert (row["write_rating"], row["write_description"]) == (1, 1)
+
+
+def test_tag_create_unchecked_write_flags_land_as_zero(client):
+    """新表单带隐藏位：未勾选 = 明确不写。"""
+    c, db = client
+    resp = c.post("/config/tags", data={
+        "name": "t", "kind": "primary", "write_flags": "1",
+        "write_description": "1",          # 只勾了描述
+    })
+    assert resp.status_code == 200
+    row = _rows(db, "SELECT write_rating, write_description FROM tags")[0]
+    assert (row["write_rating"], row["write_description"]) == (0, 1)
+
+
+def test_tag_update_toggles_write_flags_both_ways(client):
+    c, db = client
+    tid = crud.insert_tag(db, name="t", kind="primary")
+
+    def flags():
+        row = _rows(db, "SELECT write_rating, write_description FROM tags")[0]
+        return (row["write_rating"], row["write_description"])
+
+    c.post(f"/config/tags/{tid}", data={"name": "t", "kind": "primary",
+                                        "write_flags": "1"})
+    assert flags() == (0, 0)
+
+    c.post(f"/config/tags/{tid}", data={"name": "t", "kind": "primary",
+                                        "write_flags": "1", "write_rating": "1",
+                                        "write_description": "1"})
+    assert flags() == (1, 1)
+
+
+def test_tag_update_without_form_marker_keeps_flags(client):
+    """没有隐藏位的提交（旧 HTML 的长开标签页）不得把开关关掉。"""
+    c, db = client
+    tid = crud.insert_tag(db, name="t", kind="primary", write_rating=True,
+                          write_description=True)
+    c.post(f"/config/tags/{tid}", data={"name": "t", "kind": "primary"})
+    row = _rows(db, "SELECT write_rating, write_description FROM tags")[0]
+    assert (row["write_rating"], row["write_description"]) == (1, 1)
+
+
+def test_tags_page_renders_write_checkboxes(client):
+    """创建表单默认两个都勾选；已关掉的标签在编辑表单里不勾选、列表挂徽标。"""
+    import re
+    c, db = client
+    crud.insert_tag(db, name="截图", kind="primary", write_rating=False)
+    html = c.get("/config/tags").text
+    assert 'id="new_write_rating" name="write_rating" value="1" checked' in html
+    assert 'id="new_write_description" name="write_description" value="1" checked' in html
+    # 编辑表单：write_rating 未勾选（value 后直接跟 class，没有 checked）
+    assert re.search(r'name="write_rating" value="1"\s+class="h-4', html)
+    assert "不写评分" in html
+    assert "不写描述" not in html          # 描述仍为默认（写），不挂徽标
+
+
 def test_tag_create_invalid_kind_rejected(client):
     c, db = client
     resp = c.post("/config/tags", data={

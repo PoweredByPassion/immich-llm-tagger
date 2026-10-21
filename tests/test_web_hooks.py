@@ -216,12 +216,25 @@ def test_completed_record_skipped(ctx):
     client, token, db = ctx
     with db.connect() as conn:
         conn.execute(
-            "INSERT INTO asset_records (asset_id, source, status, dry_run) "
-            "VALUES ('asset-1', 'webhook', 'ok', 0)"
+            "INSERT INTO asset_records (asset_id, source, status, dry_run, applied_at) "
+            "VALUES ('asset-1', 'webhook', 'ok', 0, '2026-01-01 00:00:01')"
         )
     assert _post(client, token, {"data": {"asset": _ASSET}}).status_code == 200
     assert len(_job_params(db)) == 0
     assert len(_events(db, "asset_skipped")) == 1
+
+
+def test_record_without_applied_at_is_retried(ctx):
+    """同谓词的第二份拷贝（hooks._has_completed_record）也必须改口径：
+    apply 失败的资产在 webhook 路径上不能被判"已完成"而在入队前丢掉。"""
+    client, token, db = ctx
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO asset_records (asset_id, source, status, dry_run) "
+            "VALUES ('asset-1', 'webhook', 'ok', 0)"
+        )
+    assert _post(client, token, {"data": {"asset": _ASSET}}).status_code == 200
+    assert len(_job_params(db)) == 1
 
 
 def test_dry_run_record_does_not_skip(ctx):

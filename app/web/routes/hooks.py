@@ -65,14 +65,10 @@ def _hint(asset: dict) -> dict:
 
 
 def _has_completed_record(db, asset_id: str) -> bool:
-    """asset_records 有 dry_run=false AND status=ok → 已完成（防 AssetTagged 循环）。"""
-    with db.connect() as conn:
-        row = conn.execute(
-            "SELECT 1 FROM asset_records "
-            "WHERE asset_id = ? AND dry_run = 0 AND status = 'ok' LIMIT 1",
-            (asset_id,),
-        ).fetchone()
-    return row is not None
+    """与 executor._already_done 同口径 —— 曾经的独立副本是隐患源（§7.1）。"""
+    from app.engine.executor import _already_done
+
+    return _already_done(db, asset_id)
 
 
 def _has_active_single(db, asset_id: str) -> bool:

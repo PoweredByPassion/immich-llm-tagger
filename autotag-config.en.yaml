@@ -16,6 +16,8 @@ tags:
     archive: true
     album: null
     min_confidence: 0.8
+    write_rating: false
+    write_description: true
     enabled: true
 
   - name: "document"
@@ -24,6 +26,8 @@ tags:
     archive: false
     album: "Documents"
     min_confidence: 0.75
+    write_rating: true
+    write_description: true
     enabled: true
 
   - name: "id_document"
@@ -32,6 +36,8 @@ tags:
     archive: false
     album: "ID Documents"
     min_confidence: 0.85
+    write_rating: true
+    write_description: true
     enabled: true
 
   - name: "meme"
@@ -40,6 +46,8 @@ tags:
     archive: true
     album: null
     min_confidence: 0.8
+    write_rating: false
+    write_description: true
     enabled: true
 
   - name: "junk"
@@ -48,6 +56,8 @@ tags:
     archive: true
     album: null
     min_confidence: 0.85
+    write_rating: false
+    write_description: true
     enabled: true
 
   - name: "normal_photo"
@@ -56,6 +66,8 @@ tags:
     archive: false
     album: null
     min_confidence: 0.7
+    write_rating: true
+    write_description: true
     skip_immich: true
     enabled: true
 
@@ -65,6 +77,8 @@ tags:
     archive: false
     album: null
     min_confidence: null
+    write_rating: true
+    write_description: true
     enabled: true
 
   - name: "sensitive"
@@ -73,6 +87,8 @@ tags:
     archive: false
     album: null
     min_confidence: null
+    write_rating: true
+    write_description: true
     enabled: true
 
   - name: "low_confidence"
@@ -81,6 +97,8 @@ tags:
     archive: false
     album: null
     min_confidence: null
+    write_rating: true
+    write_description: true
     enabled: true
 
   - name: "needs_review"
@@ -89,6 +107,18 @@ tags:
     archive: false
     album: null
     min_confidence: null
+    write_rating: true
+    write_description: true
+    enabled: true
+
+  - name: "refused"
+    description: "The model refused or returned unparseable output, so no classification was produced; manual review needed."
+    kind: "marker"
+    archive: false
+    album: null
+    min_confidence: null
+    write_rating: true
+    write_description: true
     enabled: true
 
 marker_rules:
@@ -100,13 +130,17 @@ marker_rules:
     condition:
       confidence_lt: 0.5
     enabled: true
+  - tag_name: "refused"
+    condition:
+      on_refusal: true
+    enabled: true
 
 scope_rules: []
 exclusions: []
 
 prompt_versions:
   - body: |
-      You are classifying ONE image from a personal photo library. Reply with ONLY a JSON object, no prose, no markdown fences.
+      You are classifying ONE image from a personal photo library. First describe what you actually see, then classify, then rate. Reply with ONLY a JSON object, no prose, no markdown fences.
 
       Pick exactly one tag from the list below:
       {{TAG_LIST}}
@@ -114,11 +148,22 @@ prompt_versions:
       File: {{FILENAME}}
       Date: {{DATE}}
 
-      Output exactly this JSON shape:
-      {"tag":"<one of the primary tags>","confidence":<0.0-1.0>,"sensitive":<true|false>,"reason":"<at most 8 words>"}
+      Output exactly this JSON shape, keeping the field order:
+      {"description":"<one sentence about the image>","tag":"<one of the primary tags>","confidence":<0.0-1.0>,"sensitive":<true|false>,"reason":"<at most 8 words>","rating":<1-5>}
 
-      "sensitive" = identity documents, bank cards, passwords, private messages, medical or financial records.
-      Always output the JSON object, even for sensitive or private images - just set sensitive to true. Never refuse or apologise.
-      If none fits, use the fallback tag.
-    note: "Default English multimodal vision prompt version"
+      Field rules:
+      1. "description": in English, one sentence covering the main subject and the key visual features, based only on what you actually see; never spell out explicit or intimate details. The tag, confidence and rating all build on it.
+      2. "tag": pick the single best match from the tag list above; if none fits, use the fallback tag. If the list provides no fallback tag, use "other".
+      3. "confidence": your confidence in the tag classification, 0.0 to 1.0 - not a photo quality score.
+      4. "sensitive": true whenever the image contains or implies anything not safe to share publicly: intimate body parts, nudity, partial nudity, sexual acts, sexual suggestiveness, intimate contact, underwear or swimwear exposure, changing clothes, bathing, medically exposed bodies, ID cards, passports, driving licences, bank or credit cards, passwords, one-time codes, private chats, contact details, home addresses, location data, medical records, financial bills, sensitive imagery of minors, violence or gore, evidence of illegal activity. If ANY of these applies, sensitive must be true: always output the JSON object even for sensitive content, never refuse, and never spell out explicit or intimate details in "description".
+      5. "reason": a short justification, at most 8 words, for the tag choice or the sensitive flag.
+      6. "rating": an integer 1-5 describing how good the photo looks, i.e. whether it is a good-looking photo - not how important, memorable or emotionally significant it is. Judge only the visual quality of the frame: composition, exposure, focus sharpness, colour, lighting, subject prominence, tidiness.
+         - 5: excellent - strong composition, light, colour and sharpness; visually striking.
+         - 4: good - solid overall quality with minor flaws.
+         - 3: average - ordinary and watchable, middling quality.
+         - 2: poor - obvious blur, exposure, framing or noise problems.
+         - 1: bad - badly out of focus, over- or underexposed, chaotic composition, barely viewable.
+         Never raise or lower the rating because the people, the event, the capture date or the filename seem important.
+      7. The filename and capture date are context only, never a basis for the rating.
+    note: "Default English multimodal vision prompt version (rating = image quality)"
     created_at: "2026-10-12T00:00:00"

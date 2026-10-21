@@ -1,6 +1,6 @@
 """人工改判与标记已复核。
 
-与 apply.py 的区别：
+与自动分类（提交器 app/classify/commit.py）的区别：
 - 改判不是自动分类：无 LLM 调用，不写 asset_records；
 - 不动可见性与相册（manual_override 跳过可见性与相册修改）；
 - change_log 的 job_id 为 NULL —— 改判不隶属任何 job；

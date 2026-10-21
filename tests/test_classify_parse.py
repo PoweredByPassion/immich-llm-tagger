@@ -81,6 +81,54 @@ class TestNormalize:
             markers=("sensitive",),  # 内置规则：拒答 → sensitive marker（§5.4）
         )
 
+    def test_refusal_appends_on_refusal_markers(self):
+        """on_refusal 规则在拒答时打标；置信度规则不参与（confidence 为 None）。"""
+        c = normalize(
+            None,
+            refusal_text="抱歉，我无法响应这张图片。",
+            enabled_primary_tags={"screenshot"},
+            fallback_tag="other",
+            marker_rules=[("低置信", {"confidence_lt": 0.8}),
+                          ("识别失败", {"on_refusal": True})],
+        )
+        assert c.sensitive is True
+        assert c.markers == ("sensitive", "识别失败")
+
+    def test_unparseable_output_also_gets_on_refusal_markers(self):
+        """不合契约的散文输出：与 pipeline 的 status="refused" 对齐，同样打上拒答 marker。"""
+        c = normalize(
+            None,
+            refusal_text="The image shows a cat.",
+            enabled_primary_tags={"screenshot"},
+            fallback_tag="other",
+            marker_rules=[("识别失败", {"on_refusal": True})],
+        )
+        assert c.tag == "other" and c.confidence is None
+        assert c.sensitive is False
+        assert c.markers == ("识别失败",)
+
+    def test_on_refusal_rule_silent_on_success(self):
+        c = normalize(
+            {"tag": "screenshot", "confidence": 0.9, "sensitive": False},
+            refusal_text=None,
+            enabled_primary_tags={"screenshot"},
+            fallback_tag="other",
+            marker_rules=[("识别失败", {"on_refusal": True})],
+        )
+        assert c.markers == ()
+
+    def test_on_refusal_marker_named_sensitive_not_duplicated(self):
+        """拒答标记与内置 sensitive marker 同名时只留一个。"""
+        c = normalize(
+            None,
+            refusal_text="抱歉，我无法响应这张图片。",
+            enabled_primary_tags={"screenshot"},
+            fallback_tag="other",
+            marker_rules=[("sensitive", {"on_refusal": True}),
+                          ("sensitive", {"on_refusal": True})],
+        )
+        assert c.markers == ("sensitive",)
+
     def test_normal_parse(self):
         c = normalize(
             {"tag": "screenshot", "confidence": 0.9, "sensitive": False, "reason": "ui"},
@@ -298,3 +346,43 @@ class TestMarkerBoundary:
             marker_rules=[("low_confidence", {"confidence_lt": 0.6})],
         )
         assert c.markers == ()
+
+
+# ---------------------------------------------------------------------------
+# normalize: rating / description（Task 4 解析层扩展）
+# ---------------------------------------------------------------------------
+
+class TestNormalizeRatingDescription:
+    def test_normalize_reads_rating_and_description(self):
+        from app.classify.parse import normalize
+        cls = normalize({"tag": "cat", "confidence": 0.9, "rating": 4,
+                         "description": "  一只猫在窗台  "},
+                        refusal_text=None, enabled_primary_tags={"cat"},
+                        fallback_tag="other", marker_rules=[])
+        assert cls.rating == 4
+        assert cls.description == "一只猫在窗台"       # 已 strip
+
+    def test_normalize_rejects_invalid_rating(self):
+        from app.classify.parse import normalize
+        for bad in (0, 6, -1, "4", 3.5, True):
+            cls = normalize({"tag": "cat", "rating": bad}, refusal_text=None,
+                            enabled_primary_tags={"cat"}, fallback_tag="other",
+                            marker_rules=[])
+            assert cls.rating is None, bad
+
+    def test_normalize_blank_description_is_none(self):
+        from app.classify.parse import normalize
+        for blank in ("", "   ", None, 123):
+            cls = normalize({"tag": "cat", "description": blank}, refusal_text=None,
+                            enabled_primary_tags={"cat"}, fallback_tag="other",
+                            marker_rules=[])
+            assert cls.description is None, blank
+
+    def test_missing_fields_do_not_change_status_inputs(self):
+        """缺 rating/description 不得影响 tag/confidence（契约扩字段是向后兼容的）。"""
+        from app.classify.parse import normalize
+        cls = normalize({"tag": "cat", "confidence": 0.8}, refusal_text=None,
+                        enabled_primary_tags={"cat"}, fallback_tag="other",
+                        marker_rules=[])
+        assert (cls.tag, cls.confidence) == ("cat", 0.8)
+        assert cls.rating is None and cls.description is None

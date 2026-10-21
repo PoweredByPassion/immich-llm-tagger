@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from pathlib import Path
 
@@ -240,6 +241,59 @@ def test_detail_404_when_no_records(client):
     assert resp.status_code == 404
 
 
+# ------------------------------------------- Task 16: apply 重试胶囊 / 评分描述
+
+def _set_apply_attempts(db, asset_id: str, n: int) -> None:
+    with db.connect() as conn:
+        conn.execute(
+            "UPDATE asset_state SET apply_attempts = ? WHERE asset_id = ?",
+            (n, asset_id),
+        )
+
+
+def test_detail_retry_pending_pill_shows_attempts_and_cap(client):
+    """apply 失败待重试：黄色胶囊「待重试 (1/3)」，上限取自 SettingsStore
+    （只有 apply_attempts 一个数则第二个 %s 填不出来）。"""
+    c, db = client
+    _insert_record(db, ASSET_ID)
+    _insert_state(db, ASSET_ID)
+    _set_apply_attempts(db, ASSET_ID, 1)
+    html = c.get(f"/assets/{ASSET_ID}").text
+    assert "待重试 (1/3)" in html
+
+
+def test_detail_gave_up_pill_when_attempts_reach_cap(client):
+    """attempts ≥ apply_max_attempts（默认 3）→ 红色「已放弃应用」。"""
+    c, db = client
+    _insert_record(db, ASSET_ID)
+    _insert_state(db, ASSET_ID)
+    _set_apply_attempts(db, ASSET_ID, 3)
+    html = c.get(f"/assets/{ASSET_ID}").text
+    assert "已放弃应用" in html
+    assert "待重试" not in html
+
+
+def test_detail_no_retry_pill_when_zero_attempts(client):
+    c, db = client
+    _insert_record(db, ASSET_ID)
+    _insert_state(db, ASSET_ID)
+    html = c.get(f"/assets/{ASSET_ID}").text
+    assert "待重试" not in html
+    assert "已放弃应用" not in html
+
+
+def test_detail_shows_rating_and_description(client):
+    """详情历史表展示本次分析产出的 rating / description。"""
+    c, db = client
+    _insert_record(db, ASSET_ID, rating=4, description="一只在窗边的猫")
+    _insert_state(db, ASSET_ID)
+    html = c.get(f"/assets/{ASSET_ID}").text
+    assert "一只在窗边的猫" in html
+    assert "评分" in html
+    assert "描述" in html
+    assert ">4<" in html  # rating 单元格
+
+
 # ------------------------------------------------------------------- 同步
 
 class _FakeClient:
@@ -247,6 +301,7 @@ class _FakeClient:
     asset = None
     thumbnail = b"\xff\xd8\xff\xe0THUMB-JPEG"
     thumb_error = None  # None 或 status_code
+    sizes: list[str] = []  # fetch_thumbnail_bytes 收到的 size，按调用顺序
 
     def __init__(self, *, base_url, api_key, verify_ssl, timeout, **kw):
         assert timeout == 30.0 or timeout > 0
@@ -259,6 +314,7 @@ class _FakeClient:
         return _FakeClient.asset
 
     def fetch_thumbnail_bytes(self, asset_id, size="preview"):
+        _FakeClient.sizes.append(size)
         if _FakeClient.thumb_error is not None:
             raise assets_ui_module.ImmichError("thumb fail", _FakeClient.thumb_error)
         return _FakeClient.thumbnail
@@ -268,6 +324,7 @@ class _FakeClient:
         cls.asset = None
         cls.thumb_error = None
         cls.thumbnail = b"\xff\xd8\xff\xe0THUMB-JPEG"
+        cls.sizes = []
         assets_ui_module._fake_instances = []
 
 
@@ -665,3 +722,185 @@ def test_list_renders_created_at_and_thumb_img(client):
     assert "2026-10-12 08:00:00" in html
     assert f'src="/assets/{ASSET_ID}/thumb"' in html
     assert 'loading="lazy"' in html
+
+
+# ---------------------------------- 任务 7: 正在识别 / 预测vs实际 / 大图预览
+
+def _insert_lease(db, asset_id: str, *, seconds: int = 600) -> None:
+    """造一张"正在识别"的资产：asset_state 有未过期的活租约。"""
+    sign = "+" if seconds >= 0 else "-"
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO asset_state (asset_id, lease_owner, lease_expires_at) "
+            "VALUES (?, 1, datetime('now', ?))",
+            (asset_id, f"{sign}{abs(seconds)} seconds"),
+        )
+
+
+def test_list_shows_in_flight_assets_not_clickable(client):
+    """活租约的资产出现在「正在识别」带里，但不给详情链接（无记录可看）。"""
+    c, db = client
+    _insert_lease(db, "asset-inflight")
+    html = c.get("/assets").text
+    assert "asset-inflight" in html
+    assert "正在识别 1 张" in html
+    assert 'href="/assets/asset-inflight"' not in html
+
+
+def test_list_in_flight_requires_live_lease(client):
+    """租约已过期（worker 崩了）不算在飞，不会长期挂着误导用户。"""
+    c, db = client
+    _insert_lease(db, "asset-expired", seconds=-60)
+    html = c.get("/assets").text
+    assert "asset-expired" not in html
+    assert "正在识别 1 张" not in html
+
+
+def test_list_hides_in_flight_when_filtered(client):
+    """带记录筛选时不给在飞带：它们没有记录行，套不上任何按记录的筛选。"""
+    c, db = client
+    _insert_lease(db, "asset-inflight")
+    _insert_record(db, "a1", status="ok")
+    html = c.get("/assets", params={"status": "ok"}).text
+    assert "asset-inflight" not in html
+
+
+def test_list_shows_predicted_and_actual_tags_distinctly(client):
+    """标签被忽略导致 current_tag 为空时，仍能看到 LLM 预测了什么。"""
+    c, db = client
+    _insert_record(db, "a1", predicted_tag="风景")
+    _insert_state(db, "a1", current_tag=None)
+    html = c.get("/assets").text
+    assert "预测 · 风景" in html
+    assert "实际 · 未分类" in html
+
+
+def test_list_marks_actual_tag_when_present(client):
+    c, db = client
+    _insert_record(db, "a1", predicted_tag="风景")
+    _insert_state(db, "a1", current_tag="人像")
+    html = c.get("/assets").text
+    assert "预测 · 风景" in html
+    assert "实际 · 人像" in html
+
+
+def test_preview_route_requests_preview_size(client, mock_client):
+    """点图放大走 preview 尺寸（列表缩略图仍是 thumbnail）。"""
+    c, db = client
+    ConnectionStore(db).set_immich(
+        ImmichConn(url="http://immich.example", api_key="k")
+    )
+    mock_client.thumbnail = b"\xff\xd8\xff\xe0PREVIEW-JPEG"
+    resp = c.get(f"/assets/{ASSET_ID}/preview")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "image/jpeg"
+    assert resp.content == b"\xff\xd8\xff\xe0PREVIEW-JPEG"
+    assert mock_client.sizes == ["preview"]
+
+
+def test_preview_no_connection_returns_404(client, mock_client):
+    c, _ = client
+    resp = c.get(f"/assets/{ASSET_ID}/preview")
+    assert resp.status_code == 404
+    assert assets_ui_module._fake_instances == []
+
+
+def test_list_renders_lightbox_hooks(client):
+    c, db = client
+    _insert_record(db, ASSET_ID)
+    html = c.get("/assets").text
+    assert 'id="lightbox"' in html
+    assert 'id="lightbox-img"' in html
+    assert "openLightbox" in html
+    assert f'data-asset-id="{ASSET_ID}"' in html
+
+
+# ---------------------------------------- Immich 深链（列表右上角 / 详情跳转）
+
+def test_list_card_links_to_immich_when_configured(client):
+    """配好 Immich 后每张卡片右上角给出 {server}/photos/{id} 新标签跳转。"""
+    c, db = client
+    ConnectionStore(db).set_immich(
+        ImmichConn(url="http://immich.example:2283/", api_key="k")
+    )
+    _insert_record(db, ASSET_ID)
+    html = c.get("/assets").text
+    assert f'href="http://immich.example:2283/photos/{ASSET_ID}"' in html
+    assert 'target="_blank"' in html
+    assert 'rel="noopener noreferrer"' in html
+
+
+def test_list_card_no_immich_link_when_unconfigured(client):
+    """未配 Immich 时不渲染跳转（避免死链）。"""
+    c, db = client
+    _insert_record(db, ASSET_ID)
+    html = c.get("/assets").text
+    assert "/photos/" not in html
+
+
+def test_detail_shows_preview_and_immich_link(client):
+    c, db = client
+    ConnectionStore(db).set_immich(
+        ImmichConn(url="http://immich.example:2283", api_key="k")
+    )
+    _insert_record(db, ASSET_ID)
+    html = c.get(f"/assets/{ASSET_ID}").text
+    assert f'src="/assets/{ASSET_ID}/preview"' in html
+    assert f'href="http://immich.example:2283/photos/{ASSET_ID}"' in html
+
+
+def test_detail_no_immich_link_when_unconfigured(client):
+    c, db = client
+    _insert_record(db, ASSET_ID)
+    html = c.get(f"/assets/{ASSET_ID}").text
+    assert "/photos/" not in html
+    assert "尚未配置 Immich 连接" in html
+
+
+def test_detail_section_order_matches_spec(client):
+    """自上而下：状态快照 → 图片/Immich → 分类历史 → 人工改判 → raw → LLM 输入。"""
+    c, db = client
+    _insert_record(
+        db, ASSET_ID,
+        llm_request=json.dumps({"model": "qwen-vl", "max_tokens": 1234,
+                                "messages": []}),
+    )
+    _insert_state(db, ASSET_ID)
+    html = c.get(f"/assets/{ASSET_ID}").text
+    order = [
+        "本地状态快照",
+        "图片预览与 Immich 跳转",
+        "分类历史",
+        "人工改判 (Manual Override)",
+        "原始多模态返回",
+        "LLM 输入参数",
+    ]
+    positions = [html.index(marker) for marker in order]
+    assert positions == sorted(positions), positions
+
+
+def test_detail_quick_actions_below_llm_section(client):
+    """同步/重分类/复核回到最下方（在 LLM 输入参数之后）。"""
+    c, db = client
+    _insert_record(
+        db, ASSET_ID,
+        llm_request=json.dumps({"model": "qwen-vl", "max_tokens": 1234,
+                                "messages": []}),
+    )
+    html = c.get(f"/assets/{ASSET_ID}").text
+    assert html.index("快捷操作") > html.index("LLM 输入参数")
+    assert html.index('hx-post="/assets/%s/sync"' % ASSET_ID) > html.index("快捷操作")
+
+
+def test_detail_new_sections_localized_english(client):
+    """详情页新组件（预览/跳转/快捷操作）在 en 下整段英文，不残留中文。"""
+    c, db = client
+    _insert_record(db, ASSET_ID)
+    html = c.get(f"/assets/{ASSET_ID}", cookies={"lang": "en"}).text
+    # Jinja 自动转义把 & 变成 &amp;
+    assert "Image Preview &amp; Immich Link" in html
+    assert "Quick Actions" in html
+    # 模板里的中文 HTML 注释是代码不是 UI 文案（编排注释会原样输出），先剥掉
+    visible = re.sub(r"<!--.*?-->", "", html, flags=re.S)
+    assert "图片预览" not in visible
+    assert "快捷操作" not in visible

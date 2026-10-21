@@ -32,7 +32,7 @@ def test_health_full_payload(data_dir: Path):
         resp = client.get("/api/health")
     assert resp.status_code == 200
     # 整体断言：三个键齐全、值正确，而不是逐字段抽查
-    assert resp.json() == {"status": "ok", "schema_version": 10, "db_writable": True}
+    assert resp.json() == {"status": "ok", "schema_version": 12, "db_writable": True}
 
 
 def test_migrations_ran_and_db_file_exists(data_dir: Path):
@@ -45,7 +45,7 @@ def test_migrations_ran_and_db_file_exists(data_dir: Path):
         (v,) = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()
     finally:
         conn.close()
-    assert v == 10
+    assert v == 12
 
 
 def test_health_reports_false_when_db_unusable(data_dir: Path, monkeypatch):

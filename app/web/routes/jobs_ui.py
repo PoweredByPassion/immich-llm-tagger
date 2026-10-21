@@ -168,7 +168,8 @@ def jobs_detail(request: Request, job_id: int):
         return request.app.state.templates.TemplateResponse(
             request, "jobs/notfound.html", {"job_id": job_id}, status_code=200
         )
-    failures = query_records(db, job_id=job_id, status="error", limit=100)
+    failures = query_records(db, job_id=job_id, status="error", limit=100,
+                             include_unapplied=True)
     ctx: dict[str, Any] = {**_job_ctx(job), "failures": failures, "params_json": json.dumps(
         job.params, ensure_ascii=False, indent=2)}
     # 回滚：done/canceled 且有 apply change_log 才可回滚；

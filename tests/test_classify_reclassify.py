@@ -3,7 +3,7 @@
 语义（设计 §5.8）：摘"本系统管理的标签"∩ 实际拥有 → change_log(tag_remove,
 job_id=本 job) → 清空 current_tag/current_markers、更新 last_job_id →
 classify_asset(source="manual") 重跑；重分类显式发起不受 manual_override
-限制（§5.5），apply_plan 的 manual_override=False。
+限制（§5.5），重跑走 override_manual=False。
 """
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ import pytest
 
 import app.classify.reclassify as rc_module
 from app.classify.pipeline import PipelineConfig, PipelineResult
+from app.classify.reclassify import reclassify_asset
 from app.db.connection import Database
 from app.db.migrate import migrate
 
@@ -35,15 +36,17 @@ def insert_tag(db, name, kind="primary"):
 
 
 class FakeClient:
-    def __init__(self, owned_tags=("风景", "我的手打标签")):
+    def __init__(self, owned_tags=("风景", "我的手打标签"), rating=None):
         self.owned = list(owned_tags)
+        self.rating = rating                       # get_asset 暴露的"当前评分"
         self.untagged: list[tuple[str, list[str]]] = []
+        self.set_props_calls: list[dict] = []
 
     def get_asset(self, asset_id):
         class _A:
             tags = [SimpleNamespace(name=n) for n in self.owned]
             original_file_name = f"{asset_id}.png"
-            exif_info = None
+            exif_info = SimpleNamespace(rating=self.rating, description=None)
             local_date_time = None
             visibility = "timeline"
         return _A()
@@ -66,14 +69,21 @@ class FakeClient:
     def add_to_album(self, album_id, asset_ids):
         pass
 
+    def set_asset_properties(self, asset_ids, **props):
+        for a in asset_ids:
+            self.set_props_calls.append({"asset_id": a, **props})
+
 
 def make_cfg():
     from app.classify.thumb import ThumbConfig
+    from app.store.connections import LLMConn
     return PipelineConfig(
         prompt_template="t {{TAG_LIST}}", tags=[],
         marker_rules=[], fallback_tag="other", default_min_confidence=0.6,
         thumb=ThumbConfig(), queue_tag_name="未分类",
-        llm=None, concurrency_owner=1,
+        llm=LLMConn(base_url="http://llm", api_key="k", model="m",
+                    timeout=30, multimodal=False),
+        concurrency_owner=1,
     )
 
 
@@ -231,3 +241,48 @@ def test_reclassify_runs_real_classify_asset_without_typeerror(
             "SELECT action FROM change_log WHERE job_id = 7 "
             "AND action IN ('tag_add', 'queue_remove')").fetchall()
     assert any(r["action"] == "tag_add" for r in rows)
+
+
+def test_reclassify_refreshes_our_own_rating(db):
+    """显式重新分类必须能刷新我们上次写的评分（§5.8.1 情形②）。
+
+    改之前：非空 → 判定"跳过" → 新结果整份丢弃，还反手打个"保留人工信息"。
+    """
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO change_log (asset_id, action, direction, payload) "
+            "VALUES ('a1','rating_set','apply','{\"old\": null, \"new\": 3}')")
+    client = FakeClient(rating=3)                 # 当前值 == 我们上次写的 new
+    llm = SimpleNamespace(
+        chat=lambda messages: SimpleNamespace(
+            # 只给 rating：属性桶会把 rating 与 description 合并成**一次**
+            # set_asset_properties，带上 description 会让断言里的 dict 对不上。
+            content='{"tag": "风景", "confidence": 0.9, "sensitive": false, '
+                    '"reason": "ok", "rating": 5}',
+            model="m", usage=None),
+    )
+    reclassify_asset(db, client, llm, make_cfg(), "a1", job_id=7)
+
+    props = [c for c in client.set_props_calls if "rating" in c]
+    assert props == [{"asset_id": "a1", "rating": 5}]
+    # 跳过标记标签不得被贴：断言在 tag id 上（tag_assets 存的是
+    # (tag_ids, asset_ids) 元组，直接遍历拿不到 tag 名字符串）。
+    tagged_ids = [t for ids, _ in getattr(client, "tagged", []) for t in ids]
+    assert "id-保留人工信息" not in tagged_ids
+
+
+def test_reclassify_resets_apply_attempts(db):
+    """§7.3：改判必须重置 apply_attempts，否则"已放弃"的资产被永久钉死。"""
+    with db.connect() as conn:
+        conn.execute("INSERT INTO asset_state (asset_id, apply_attempts) "
+                     "VALUES ('a1', 3)")
+    llm = SimpleNamespace(
+        chat=lambda messages: SimpleNamespace(
+            content='{"tag": "风景", "confidence": 0.9, "sensitive": false, '
+                    '"reason": "ok"}',
+            model="m", usage=None),
+    )
+    reclassify_asset(db, FakeClient(), llm, make_cfg(), "a1", job_id=7)
+    with db.connect() as conn:
+        assert conn.execute("SELECT apply_attempts FROM asset_state "
+                            "WHERE asset_id='a1'").fetchone()["apply_attempts"] == 0

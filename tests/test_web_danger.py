@@ -66,6 +66,11 @@ def test_danger_page_renders_preview(client, mock_immich):
     assert "标签仅从本系统管理过的图片上摘除" in html
     assert "/config/transfer" in html
     assert 'name="confirm"' in html
+    # 四个维度勾选框 + 第二层确认输入
+    assert html.count('name="dimensions"') == 4
+    for value in ("tag", "classification", "rating", "description"):
+        assert f'value="{value}"' in html
+    assert 'name="confirm2"' in html
 
 
 def test_danger_reset_wrong_confirm_word_422(client, mock_immich):
@@ -73,14 +78,25 @@ def test_danger_reset_wrong_confirm_word_422(client, mock_immich):
     resp = c.post("/danger/reset", data={"confirm": "reset"}, follow_redirects=False)
     assert resp.status_code == 422
     assert "RESET" in resp.text
+    # 确认词正确但一个维度都没勾 → 仍 422（第二层：勾选校验）
+    resp2 = c.post("/danger/reset",
+                   data={"confirm": "RESET", "confirm2": "RESET"},
+                   follow_redirects=False)
+    assert resp2.status_code == 422
+    assert "至少勾选一个" in resp2.text
 
 
 def test_danger_reset_correct_creates_job(client, mock_immich):
     c, db = client
-    resp = c.post("/danger/reset", data={"confirm": "RESET"}, follow_redirects=False)
+    resp = c.post("/danger/reset", data={
+        "confirm": "RESET", "confirm2": "RESET",
+        "dimensions": ["tag", "classification", "rating", "description"],
+    }, follow_redirects=False)
     assert resp.status_code == 303
     from app.store import jobs as jobs_store
     job = [j for j in jobs_store.list_jobs(db) if j.type == "reset"][0]
+    assert sorted(job.params["dimensions"]) == [
+        "classification", "description", "rating", "tag"]
     assert resp.headers["location"] == f"/jobs/{job.id}"
 
 
@@ -88,7 +104,9 @@ def test_danger_reset_blocked_when_active_job(client, mock_immich):
     c, db = client
     from app.store import jobs as jobs_store
     jobs_store.create_job(db, "scan", {})
-    resp = c.post("/danger/reset", data={"confirm": "RESET"}, follow_redirects=False)
+    resp = c.post("/danger/reset", data={
+        "confirm": "RESET", "confirm2": "RESET", "dimensions": ["tag"],
+    }, follow_redirects=False)
     assert resp.status_code == 422
     assert "有任务进行中" in resp.text
     from app.store import jobs as jobs_store2

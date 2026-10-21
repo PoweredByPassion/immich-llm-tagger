@@ -333,6 +333,50 @@ def test_set_visibility_invalid_value_raises() -> None:
         _client(lambda r: httpx.Response(200)).set_visibility([ASSET_ID], "bogus")
 
 
+# ------------------------------------------------------------ asset properties
+
+
+def test_set_asset_properties_carries_all_three_fields() -> None:
+    """一次 PUT /assets 带齐 visibility+rating+description。"""
+    rec = Recorder({("PUT", "/api/assets"): None})
+    _client(rec).set_asset_properties(
+        [ASSET_ID], visibility="archive", rating=4, description="一只猫")
+    method, path, body = rec.calls[0]
+    assert (method, path) == ("PUT", "/api/assets")
+    assert json.loads(body) == {
+        "ids": [ASSET_ID], "visibility": "archive",
+        "rating": 4, "description": "一只猫",
+    }
+
+
+def test_set_asset_properties_omits_unspecified_fields() -> None:
+    """未给的字段必须**缺席**（Unset ≠ null）：缺席=不动，null=置空。"""
+    rec = Recorder({("PUT", "/api/assets"): None})
+    _client(rec).set_asset_properties([ASSET_ID], rating=None)
+    assert json.loads(rec.calls[0][2]) == {"ids": [ASSET_ID], "rating": None}
+
+
+def test_set_asset_properties_chunks_and_empty_is_noop() -> None:
+    assets = [f"22222222-2222-2222-2222-{i:012d}" for i in range(1001)]
+    rec = Recorder({("PUT", "/api/assets"): None})
+    _client(rec).set_asset_properties(assets, rating=3)
+    puts = [c for c in rec.calls if c[0] == "PUT"]
+    assert [len(json.loads(b)["ids"]) for _, _, b in puts] == [500, 500, 1]
+
+    def boom(request: httpx.Request) -> httpx.Response:
+        pytest.fail("空 asset 列表不应发请求")
+
+    _client(boom).set_asset_properties([], rating=3)
+
+
+def test_set_asset_properties_rejects_bad_visibility() -> None:
+    """裸字符串必须先转 AssetVisibility —— 直接塞进 DTO 会在 to_dict
+    调 .value 时 AttributeError，且报错离现场很远。"""
+    with pytest.raises(ImmichError):
+        _client(lambda r: httpx.Response(204)).set_asset_properties(
+            [ASSET_ID], visibility="bogus")
+
+
 # --------------------------------------------------------------- albums
 
 
@@ -377,6 +421,13 @@ def test_ensure_album_filters_by_name_query() -> None:
 
     _client(handler).ensure_album("查询相册")
     assert seen["name"] == "查询相册"
+
+
+def test_list_albums_returns_all() -> None:
+    rec = Recorder({("GET", "/api/albums"): [_album_payload("3", "截图相册")]})
+    albums = _client(rec).list_albums()
+    assert [a.album_name for a in albums] == ["截图相册"]
+    assert rec.calls[0][2] == b""      # 不带 name 查询参数
 
 
 def test_add_to_album_single_chunk() -> None:
@@ -522,9 +573,28 @@ def test_untag_assets_item_failure_raises() -> None:
 
 def test_tag_assets_item_failure_raises() -> None:
     rec = Recorder({("PUT", f"/api/tags/{TAG_ID}/assets"):
-                    [_bulk_result(ASSET_ID, False, error="duplicate")]})
+                    [_bulk_result(ASSET_ID, False, error="no_permission")]})
     with pytest.raises(ImmichError, match="部分失败"):
         _client(rec).tag_assets([TAG_ID], [ASSET_ID])
+
+
+def test_tag_assets_duplicate_is_tolerated() -> None:
+    """duplicate = 图本就有这个标签，终态已满足 → 按成功处理。
+
+    真机回归：拒答图重复打 sensitive，duplicate 被当成失败 → apply 重试三次
+    后放弃并打上跳过标记（本该是幂等成功）。
+    """
+    rec = Recorder({("PUT", f"/api/tags/{TAG_ID}/assets"):
+                    [_bulk_result(ASSET_ID, False, error="duplicate")]})
+    _client(rec).tag_assets([TAG_ID], [ASSET_ID])      # 不抛即通过
+
+
+def test_untag_assets_not_found_still_raises() -> None:
+    """白名单只给打标端点：摘标放过 not_found 就是那起假成功事故的翻版。"""
+    rec = Recorder({("DELETE", f"/api/tags/{TAG_ID}/assets"):
+                    [_bulk_result(ASSET_ID, False, error="not_found")]})
+    with pytest.raises(ImmichError, match="not_found"):
+        _client(rec).untag_assets(TAG_ID, [ASSET_ID])
 
 
 def test_add_to_album_item_failure_raises() -> None:

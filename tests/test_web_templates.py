@@ -70,10 +70,10 @@ MONITOR_LINKS = ["/", "/jobs", "/assets"]
 CONFIG_LINKS = [
     "/config/immich",
     "/config/llm",
+    "/config/webhook",
     "/config/poll",
     "/config/scope",
     "/config/tags",
-    "/config/exclusions",
     "/config/markers",
     "/config/prompt",
 ]

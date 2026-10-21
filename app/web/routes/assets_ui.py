@@ -1,11 +1,11 @@
 """图片记录页：列表（筛选 + 分页）、详情（快照 + 历史 + 原始返回）、
 从 Immich 同步 asset_state。
 
-同步的标签口径与 app/classify/apply.py 写回逻辑对齐：current_tag 取
+同步的标签口径与提交器（app/classify/commit.py）的写回逻辑对齐：current_tag 取
 Immich 资产上命中的本地 tags 表 primary 标签，current_markers 取命中的
 marker 标签（两者都只认本地 tags 表里登记过的名字，Immich 上的其他标签
 不进本地快照）；visibility 直接采用 Immich 返回的 visibility 值
-（"timeline"/"archive"/…，与 apply.py 的 set_visibility 取值同一来源）。
+（"timeline"/"archive"/…，与提交器 set_visibility 取值同一来源）。
 所有失败路径渲染错误横幅，绝不 500。
 """
 from __future__ import annotations
@@ -24,10 +24,12 @@ from app.store.assets import (
     count_records,
     current_tag_counts,
     get_state,
+    in_flight_assets,
     query_records,
     records_for_asset,
 )
 from app.store.connections import ConnectionStore
+from app.store.settings import SettingsStore
 from app.store.tags import load_tags
 from app.web.i18n import lang_from_cookie, t
 
@@ -56,6 +58,19 @@ def _int_or_none(raw: str | None) -> int | None:
         return None
 
 
+def _immich_base_url(db) -> str:
+    """Immich 服务器地址（已去尾斜杠）；未配置返回空串。"""
+    return ConnectionStore(db).get_immich().url.strip().rstrip("/")
+
+
+def _immich_asset_url(base: str, asset_id: str) -> str | None:
+    """Immich Web 单图深链：`{server}/photos/{assetId}`。
+
+    未配服务器时返回 None —— 模板据此不渲染跳转入口，避免死链。
+    """
+    return f"{base}/photos/{asset_id}" if base else None
+
+
 @router.get("/", response_class=HTMLResponse)
 def asset_list(request: Request):
     db = _db(request)
@@ -79,6 +94,18 @@ def asset_list(request: Request):
                             **filters)
     tag_names = sorted({t.name for t in load_tags(db)})
     tag_counts = current_tag_counts(db)
+    # 「正在识别」只在不带任何筛选、且在第一页时展示：在飞的资产还没有
+    # asset_records 行，任何按记录做的筛选（status/source/job/dry_run）都
+    # 套不到它们身上，硬塞进筛选结果会误导。current_tag 筛选同理。
+    unfiltered = (
+        status is None and current_tag is None and source is None
+        and job_id is None and dry_run is None
+    )
+    in_flight = in_flight_assets(db) if (page == 1 and unfiltered) else []
+    # 每条记录带上 Immich 深链（未配服务器则为 None，模板不渲染跳转图标）。
+    immich_base = _immich_base_url(db)
+    for r in records:
+        r["immich_url"] = _immich_asset_url(immich_base, r["asset_id"])
     return _templates(request).TemplateResponse(
         request,
         "assets/list.html",
@@ -97,6 +124,7 @@ def asset_list(request: Request):
             "tag_names": tag_names,
             "tag_counts": tag_counts,
             "sources": ["webhook", "poll", "manual"],
+            "in_flight": in_flight,
         },
     )
 
@@ -133,14 +161,17 @@ def asset_detail(request: Request, asset_id: str):
             "primary_tags": primary_tags,
             "marker_tags": marker_tags,
             "state_job_exists": state_job_exists,
+            # 详情页顶部「图片 + Immich 跳转」组件
+            "immich_url": _immich_asset_url(_immich_base_url(db), asset_id),
+            # _state_block.html 的重试胶囊需要「尝试次数/上限」两个数
+            "apply_max_attempts": SettingsStore(db).get("apply_max_attempts"),
         },
     )
 
 
-@router.get("/{asset_id}/thumb")
-def asset_thumb(request: Request, asset_id: str):
-    """代理 Immich 缩略图（原始字节直出）。失败一律回落 404，由前端
-    onerror 显示占位图标，绝不 500、绝不冒泡。"""
+def _proxy_asset_image(request: Request, asset_id: str, size: str) -> Response:
+    """代理 Immich 图片字节（原始直出）。失败一律回落 404，由前端 onerror
+    显示占位图标，绝不 500、绝不冒泡。"""
     conn = ConnectionStore(_db(request)).get_immich()
     if not conn.url:
         return Response(status_code=404)
@@ -152,20 +183,33 @@ def asset_thumb(request: Request, asset_id: str):
             timeout=30.0,
         )
         _fake_instances.append(client)
-        raw = client.fetch_thumbnail_bytes(asset_id, "thumbnail")
+        raw = client.fetch_thumbnail_bytes(asset_id, size)
     except ImmichError:
         return Response(status_code=404)
     return Response(content=raw, media_type="image/jpeg")
 
 
+@router.get("/{asset_id}/thumb")
+def asset_thumb(request: Request, asset_id: str):
+    return _proxy_asset_image(request, asset_id, "thumbnail")
+
+
+@router.get("/{asset_id}/preview")
+def asset_preview(request: Request, asset_id: str):
+    """大图（Immich preview 尺寸），供列表页点图放大查看。"""
+    return _proxy_asset_image(request, asset_id, "preview")
+
+
 def _review_result(request: Request, asset_id: str) -> HTMLResponse:
-    state = get_state(_db(request), asset_id)
+    db = _db(request)
+    state = get_state(db, asset_id)
     if state is not None:
         state["current_markers_list"] = json.loads(state["current_markers"] or "[]")
     return _templates(request).TemplateResponse(
         request,
         "assets/_review_result.html",
-        {"ok": True, "asset_id": asset_id, "state": state},
+        {"ok": True, "asset_id": asset_id, "state": state,
+         "apply_max_attempts": SettingsStore(db).get("apply_max_attempts")},
     )
 
 
@@ -221,7 +265,8 @@ async def asset_override(request: Request, asset_id: str):
     return _templates(request).TemplateResponse(
         request,
         "assets/_override_result.html",
-        {"ok": True, "asset_id": asset_id, "state": state},
+        {"ok": True, "asset_id": asset_id, "state": state,
+         "apply_max_attempts": SettingsStore(db).get("apply_max_attempts")},
     )
 
 
@@ -304,5 +349,6 @@ def asset_sync(request: Request, asset_id: str):
             "message": t("assets.sync.done", lang),
             "state": get_state(db, asset_id),
             "asset_id": asset_id,
+            "apply_max_attempts": SettingsStore(db).get("apply_max_attempts"),
         },
     )

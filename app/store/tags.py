@@ -20,13 +20,17 @@ class TagDef:
     album: str | None
     min_confidence: float | None
     skip_immich: bool = False  # 识别但不在 Immich 打标/进相册/归档
+    # 是否把评分 / 描述写进 Immich（v12）。按标签控制，取代原来的
+    # enabled_effects 全局开关；默认 True = 升级后行为不变。
+    write_rating: bool = True
+    write_description: bool = True
 
 
 def load_tags(db: Database) -> list[TagDef]:
     with db.connect() as conn:
         rows = conn.execute(
             "SELECT id, name, description, kind, enabled, archive, album, "
-            "       min_confidence, skip_immich "
+            "       min_confidence, skip_immich, write_rating, write_description "
             "  FROM tags ORDER BY id"
         ).fetchall()
     return [
@@ -40,6 +44,8 @@ def load_tags(db: Database) -> list[TagDef]:
             album=row["album"],
             min_confidence=row["min_confidence"],
             skip_immich=bool(row["skip_immich"]),
+            write_rating=bool(row["write_rating"]),
+            write_description=bool(row["write_description"]),
         )
         for row in rows
     ]

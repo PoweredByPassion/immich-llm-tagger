@@ -37,7 +37,7 @@ from app.clients.immich import ImmichError
 from app.db.connection import Database
 from app.store import events, jobs
 from app.store.connections import ConnectionStore
-from app.store.settings import SettingsStore
+from app.store.settings import SettingsStore, resolve_skip_marker_tag_name
 from app.store.tags import load_tags
 
 # 内置默认模板；active_prompt_version_id
@@ -48,13 +48,21 @@ DEFAULT_PROMPT_TEMPLATE = (
     "Tags:\n{{TAG_LIST}}\n\n"
     "File: {{FILENAME}}\n"
     "Date: {{DATE}}\n\n"
-    'Respond with JSON: {"tag": "<tag>", "confidence": <0-1>, '
-    '"sensitive": <bool>, "reason": "<short>"}\n'
-    "If none fits, use the fallback tag. If this is not a screenshot or the "
-    "content is sensitive, refuse."
+    "First describe what you actually see, then classify, then rate. "
+    'Respond with JSON: {"description": "<one sentence>", "tag": "<tag>", '
+    '"confidence": <0-1>, "sensitive": <bool>, "reason": "<short>", '
+    '"rating": <1-5>}\n'
+    '"rating" says how good the photo looks (composition, exposure, focus, '
+    "colour, light) - never how important, memorable or emotionally "
+    "significant the subject is; the filename and date are context only.\n"
+    "If none fits, use the fallback tag. Set "
+    '"sensitive" true for anything not safe to share publicly (nudity, '
+    "intimate or medical images, ID cards, passports, bank cards, passwords, "
+    "private chats, contact details, addresses, medical or financial records, "
+    "sensitive imagery of minors, gore, evidence of illegal activity); always "
+    "output the JSON object, never refuse, and keep explicit or intimate "
+    'details out of "description".'
 )
-
-_UNKNOWN_TYPES = ("backfill", "undo", "reset", "reclassify")
 
 # scan 拆分后的协调器：轮询子任务直到全部终态，再收尾父 scan。不占用 worker
 # 池线程（spec：分类并发 = worker 数）。
@@ -105,6 +113,9 @@ def build_pipeline_config(db: Database) -> PipelineConfig:
         queue_tag_name=settings.get("queue_tag_name"),
         llm=conns.get_llm(),
         concurrency_owner=_owner_id(db),
+        enabled_effects=frozenset(settings.get("enabled_effects")),
+        skip_marker_tag_name=resolve_skip_marker_tag_name(settings),
+        apply_max_attempts=int(settings.get("apply_max_attempts")),
     )
 
 
@@ -427,15 +438,30 @@ def start_scan_coordinator(db_path: str | Path,
 
 
 def _already_done(db: Database, asset_id: str) -> bool:
-    """"已完成"过滤：asset_records 有 dry_run=false AND status=ok 的记录
-    （权威来源是 asset_records 而非 asset_state）。"""
+    """"已完成"过滤。看**最新一条**非 dry_run 记录（不是"存在任一条"）：
+    资产被 reclassify 后可能同时有"旧的已应用记录"与"新的失败记录"，
+    用 EXISTS 会让失败那次永不重试（§7.1）。
+
+    已完成 ⇔ 最新记录 status='ok' AND applied_at IS NOT NULL
+             OR 重试已耗尽（apply_attempts ≥ apply_max_attempts，§7.3）。
+    """
     with db.connect() as conn:
         row = conn.execute(
-            "SELECT 1 FROM asset_records "
-            "WHERE asset_id = ? AND dry_run = 0 AND status = 'ok' LIMIT 1",
+            "SELECT status, applied_at FROM asset_records "
+            " WHERE asset_id = ? AND dry_run = 0 "
+            " ORDER BY created_at DESC, id DESC LIMIT 1",
             (asset_id,),
         ).fetchone()
-    return row is not None
+        if row is not None and row["status"] == "ok" and row["applied_at"] is not None:
+            return True
+        st = conn.execute(
+            "SELECT apply_attempts FROM asset_state WHERE asset_id = ?",
+            (asset_id,),
+        ).fetchone()
+        if st is None:
+            return False
+    # 连接已关：SettingsStore 会自己开连接（WAL 下并发读安全）
+    return int(st["apply_attempts"]) >= int(SettingsStore(db).get("apply_max_attempts"))
 
 
 def _heal_queue_tag(db: Database, client, asset_id: str, queue_tag_name: str) -> None:
@@ -658,7 +684,9 @@ def run_reset_job(db: Database, client, job: jobs.JobRow) -> None:
 
 def _run_reset_job(db, client, job) -> None:
     _log_job_event(db, "job_started", job)
+    dims = job.params.get("dimensions")
     done = run_reset_steps(db, client, job_id=job.id,
-                           is_canceled=lambda: jobs.is_canceled(db, job.id))
+                           is_canceled=lambda: jobs.is_canceled(db, job.id),
+                           dimensions=set(dims) if dims else None)
     jobs.finish_job(db, job.id)
     _log_job_event(db, "job_complete", job, **done)

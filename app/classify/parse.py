@@ -82,6 +82,23 @@ def is_refusal(text: str) -> bool:
     return any(m.lower() in low for m in REFUSAL_MARKERS)
 
 
+def refusal_marker_names(marker_rules: list[tuple[str, dict]]) -> tuple[str, ...]:
+    """挑出"拒答触发"的 marker 标签名（condition 带 on_refusal）。
+
+    配置中心（Marker 规则页）可给任意 kind=marker 的标签挂一条 on_refusal 规则，
+    模型拒答时该标签就会被打上。顺序按配置，同名去重。
+    """
+    out: list[str] = []
+    for name, cond in marker_rules:
+        if cond.get("on_refusal") and name not in out:
+            out.append(name)
+    return tuple(out)
+
+
+def _unique(names) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(names))
+
+
 @dataclass(frozen=True)
 class Classification:
     tag: str
@@ -89,6 +106,8 @@ class Classification:
     sensitive: bool
     reason: str | None
     markers: tuple[str, ...]
+    rating: int | None = None
+    description: str | None = None
 
 
 def normalize(
@@ -99,10 +118,15 @@ def normalize(
     fallback_tag: str,
     marker_rules: list[tuple[str, dict]],
 ) -> Classification:
+    # 拒答 marker（配置中心 Marker 规则页的 on_refusal 规则）：模型没能给出
+    # 可用判定时打上，让人在 Immich 里能一键筛出"识别失败"的图。
+    refusal_markers = refusal_marker_names(marker_rules)
+
     if refusal_text is not None and is_refusal(refusal_text):
         return Classification(
             tag=fallback_tag, confidence=None, sensitive=True, reason=None,
-            markers=("sensitive",),  # 内置规则：拒答 → sensitive marker
+            # 内置规则：拒答 → sensitive marker + 配置的拒答 marker
+            markers=_unique(("sensitive", *refusal_markers)),
         )
 
     tag = fallback_tag
@@ -131,9 +155,30 @@ def normalize(
         if hit:
             markers.append(name)
 
+    if raw is None:
+        # 走到这里 = 文本既不是合法 JSON，也没命中拒答词（典型是模型输出散文
+        # 或残缺 JSON）。pipeline 对这两种情形都记 status="refused"，所以拒答
+        # marker 必须一并打上 —— 否则"Immich 里带 failed 标签的图"与"UI 显示
+        # refused 的图"对不上。
+        markers.extend(n for n in refusal_markers if n not in markers)
+
+    rating: int | None = None
+    if raw:
+        r = raw.get("rating")
+        # bool 是 int 的子类，必须显式排除
+        if isinstance(r, int) and not isinstance(r, bool) and 1 <= r <= 5:
+            rating = r
+
+    description: str | None = None
+    if raw:
+        d = raw.get("description")
+        if isinstance(d, str) and d.strip():
+            description = d.strip()
+
     return Classification(
         tag=tag, confidence=confidence, sensitive=sensitive,
         reason=reason, markers=tuple(markers),
+        rating=rating, description=description,
     )
 
 

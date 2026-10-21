@@ -41,7 +41,8 @@ When backing up photos from smartphones (e.g. via iCloud sync, Google Photos, or
   - **Polling Fallback**: Configurable periodic scanning to ensure zero missed assets.
 - 🔒 **Concurrency & Lease Lock**: Atomic lease claims in SQLite ensure no duplicate processing even with concurrent workers.
 - ↩️ **One-Click Undo & Reversible Operations**: Full audit logging (`change_log`) allows rolling back any job at any time.
-- 🛡️ **Non-destructive & Scoped Safety**: The Danger Zone reset only untags assets this system has tagged and unarchives photos archived by the system—tag objects and your manually curated tags on other photos remain completely untouched.
+- ⭐ **Ratings & Descriptions (switched per tag)**: Let the vision model also fill in Immich's own star rating and description. **Each tag decides whether they are written** (the same model as archive / album / skip), the rating means "how good the photo looks" rather than importance or keepsake value, and a per-field guard never overwrites something you wrote yourself.
+- 🛡️ **Non-destructive & Scoped Safety**: The Danger Zone resets only the dimensions you check (tags / classification / rating / description) and only touches assets this system has handled—tag objects and your manually curated tags on other photos remain completely untouched.
 - 🎨 **Linear Dark Management UI**: Built with FastAPI, Tailwind CSS, Alpine.js, and HTMX. Features real-time SSE progress updates, asset cards, and visual rule editors.
 
 ---
@@ -96,7 +97,7 @@ The repository provides two localized rule templates:
 **How to Import**:
 1. In the Web UI, go to **System -> Config Transfer** (`http://localhost:8080/config/transfer`).
 2. Click **Import Config**, select [`autotag-config.en.yaml`](autotag-config.en.yaml) (or [`autotag-config.zh.yaml`](autotag-config.zh.yaml)), and submit.
-3. All tags, album filing rules, archive thresholds, and prompt templates are instantly configured!
+3. All tags (including the **Write rating** / **Write description** switches and the archive/album rules), thresholds, and prompt templates are instantly configured!
 
 ---
 
@@ -120,7 +121,7 @@ Configure Immich's built-in Workflow to automatically tag new uploads as `unclas
    - URL: `http://<your-tagger-host>:8080/api/hooks/immich`
    - Custom Headers:
      ```http
-     x-webhook-token: <Your Webhook Token from Tagger UI -> Settings>
+     x-webhook-token: <Your Webhook Token from Tagger UI -> Connections -> Webhook Endpoint>
      ```
 6. **Result**: Any new photo uploaded from phones will be tagged as `unclassified`, trigger the Webhook immediately, get analyzed by the Vision LLM, filed/archived accordingly, and finally have the `unclassified` queue tag stripped away cleanly!
 
@@ -158,15 +159,63 @@ If you prefer manual control or want to organize your existing historical photos
 | **`sensitive`** | Marker | Marker Only | — | *Automatic* | Triggered automatically on IDs, bank details, passwords, or model safety refusals. |
 | **`low_confidence`**| Marker| Marker Only | — | *`< 0.80`* | Added when predicted archive confidence is below threshold; prevents auto-archive. |
 | **`needs_review`** | Marker | Marker Only | — | *`< 0.50`* | Added when confidence is very low, recommending manual review. |
+| **`refused`** | Marker | Marker Only | — | *Automatic* | Added when the model refuses to answer (or returns unparseable output) so no classification was produced — filter on it to review the failures manually. |
+
+> Whether rating/description are written is a per-tag switch too: in the table above, **archived tags default to `write_rating: false`** while still writing the description; every other tag writes both. See "Rating / description: controlled per tag" below.
+
+---
+
+## ⭐ Rating & Description
+
+Besides tags, the tagger can write Immich's built-in **star rating** (1–5) and **description** onto each asset. The vision model returns both together with the tag, and they are folded together with any visibility change into a **single `PUT /assets` request** — one request, one committed `change_log` entry per field. **Whether they are written at all is decided per tag** (next section); the table below describes what happens *after* a tag opts in.
+
+**The rating means "how good the photo looks"** — judged only on composition, exposure, focus sharpness, colour, lighting, subject prominence and tidiness. It is *not* importance, keepsake or emotional value: important people, events or dates never raise the score (the filename and capture date are context only). `confidence` is the opposite — it expresses certainty about the *classification*, not how good the photo is. These rules ship inside the default prompts (`autotag-config.en.yaml` / `.zh.yaml`) and can be edited under **Config → Prompt Versions**.
+
+> **Upgrading**: the shipped prompt now defines `rating` as image quality (it used to mean importance / keepsake value), and the rating/description switches moved from a global setting to the per-tag columns (both default to on). Existing installs get the new prompt by re-importing the YAML or pasting the new body into **Prompt Versions** and activating it; historical ratings keep their old meaning and are never recomputed — to refresh them, run **Reclassify** on the affected assets (the only path that rewrites values this system wrote).
+
+Each field is decided independently (a rating and a description on the same asset can take different branches):
+
+| Current value in Immich | What happens |
+| :--- | :--- |
+| empty (never rated / no description) | the model's value is written |
+| equals the value this system wrote last time | kept as-is on a normal re-scan; refreshed only when the apply was explicitly initiated (Reclassify) |
+| written by you | **never overwritten** — the field is skipped and the asset gets the *skip-marker* tag (default `manual-kept`; Chinese default `保留人工信息`), with the skipped field recorded in `change_log` |
+
+An existing `rating = -1` counts as a value (it is not treated as "unrated") — such an asset is left to you.
+
+### Rating / description: controlled per tag
+
+**Whether rating and description are written is decided by the tag system** — the same model as *archive* (`archive`), *album* (`album`) and *skip Immich* (`skip_immich`). In **Config → Tags**, every tag has two independent checkboxes, **Write rating** and **Write description** (both on by default). Only assets matching that tag get those fields written; a tag with the box unchecked writes nothing, logs nothing to `change_log`, and does *not* get the skip-marker tag (that marker means "we wanted to write, but your value was in the way" — not "we never intended to write").
+
+**What "Skip" covers**: `skip_immich` blocks **tags / album / archive** only — it does *not* affect rating and description, which have their own switches. So the typical setup is `normal_photo` with *Skip* + *Write rating* + *Write description* checked: your real photos get no tag and no archive, but do get rated and described (which is then the only write that tag performs). To leave a class of images completely untouched in Immich, turn all three off. The rating/description skip rules still respect a manual override.
+
+**What the shipped config does**: archived tags (`screenshot`, `meme`, `junk`) keep the description but skip the rating — archiving means "hide from the main timeline", where a star rating is meaningless, while the description still makes the asset searchable. Every other tag writes both. These are just starting values; change them any time under Tags (e.g. turn the description off for `id_document` to keep sensitive text out of that field).
+
+### `enabled_effects` (global effectors)
+
+Every write target is an independent effector, but `tag`, `visibility` and `album` are **global** switches, editable in **Config → Recognition Settings → Effectors & Retries** (`enabled_effects`); anything not listed is planned away entirely — no Immich write and no `change_log` entry. All three default to on.
+
+`rating` / `description` are **not** in that list — they moved to the per-tag switches above. Upgrade note: if a previous version had `rating` / `description` removed from `enabled_effects`, those fields will start being written again after upgrading; to stop them, uncheck the per-tag switches.
+
+The same panel contains:
+
+- **Skip-marker tag name** — the tag applied when a user-authored rating/description was skipped (empty = follow the UI language).
+- **Max apply attempts** — how often a failed apply is retried before the asset is given up on (default `3`). An asset still awaiting a retry shows a *retry* pill in its detail view, and records that never got applied are listed in the job's failure list.
+
+### Danger Zone: per-dimension reset
+
+The Danger Zone resets **four independent dimensions** — tags, classification (unarchive + remove from albums), rating, description. Each checkbox shows the *estimated* number of affected assets, computed from the local database. **Only the checked dimensions are touched**; an unchecked dimension is left exactly as it is, local mirror columns included.
+
+For rating/description the reset has a safety valve: a field is restored to the value that existed before this system first wrote it — and only if Immich's *current* value still equals what the system last wrote. If you edited it yourself since, the reset leaves it alone (an originally empty description is restored as `""`). Reset still requires typing `RESET` twice and is refused while any job is active.
 
 ---
 
 ## 🛠️ Advanced Operations
 
 - **Single Asset Processing & Sandbox**: Test LLM prompt results on any single `assetId` in real-time without writing changes to Immich.
-- **Reclassify (重新分类)**: If you update your prompt or category rules, easily trigger a reclassify on specific assets. The system strips previous managed tags and re-evaluates the asset.
+- **Reclassify (重新分类)**: If you update your prompt or category rules, easily trigger a reclassify on specific assets. The system strips previous managed tags and re-evaluates the asset — this is also the one path that refreshes a rating/description it wrote itself.
 - **Task Rollback (Undo)**: In the **Jobs** tab, click **Undo** on any finished job to reverse the tag additions, album attachments, and visibility changes made during that run. (Undoing a Danger Zone reset restores tags on system-managed assets; visibility stays unarchived.)
-- **Danger Zone Reset (安全重置)**: Untag all assets previously tagged by the system and reset photos archived by it back to the timeline, without deleting tag objects or touching user-curated tags.
+- **Danger Zone Reset (安全重置)**: Pick one or more dimensions (tags / classification / rating / description) and reset only those — see **Rating & Description** above for the rating/description safety valve. Tag objects are never deleted and user-curated tags on other photos are never touched.
 
 ---
 

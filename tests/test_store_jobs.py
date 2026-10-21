@@ -19,7 +19,7 @@ def db(tmp_path: Path) -> Database:
 # ---------- 失败模式 8：迁移 ----------
 
 def test_fresh_db_migrates_to_latest(db: Database) -> None:
-    assert current_version(db) == 10
+    assert current_version(db) == 12
     with db.connect() as conn:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(jobs)")}
     assert "cancel_requested" in cols
@@ -49,7 +49,7 @@ def test_old_v1_db_upgraded_to_v2_on_startup(tmp_path: Path) -> None:
     assert "cancel_requested" not in cols
 
     migrate(database)
-    assert current_version(database) == 10
+    assert current_version(database) == 12
     with database.connect() as conn:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(jobs)")}
     assert "cancel_requested" in cols

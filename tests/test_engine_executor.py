@@ -18,11 +18,13 @@ from app.db.connection import Database
 from app.db.migrate import migrate
 from app.engine.executor import (
     DEFAULT_PROMPT_TEMPLATE,
+    _already_done,
     build_pipeline_config,
     run_scan_job,
     run_single_job,
 )
 from app.store import events, jobs
+from app.store.settings import SettingsStore
 from app.store.tags import TagDef
 
 # --------------------------------------------------------------- fixtures
@@ -323,8 +325,8 @@ def test_classify_item_already_done_counts_as_done(db: Database,
     """幂等二次确认：资产已 ok → 计 done，不调 LLM。"""
     with db.connect() as conn:
         conn.execute(
-            "INSERT INTO asset_records (asset_id, source, status, dry_run) "
-            "VALUES ('done-asset', 'poll', 'ok', 0)")
+            "INSERT INTO asset_records (asset_id, source, status, dry_run, applied_at) "
+            "VALUES ('done-asset', 'poll', 'ok', 0, datetime('now'))")
     parent = jobs.create_job(db, "scan", {})
     jobs.claim_next(db)                    # 父 → running
     child_id = jobs.create_job(db, "classify_item",
@@ -346,8 +348,8 @@ def test_classify_item_already_done_heals_queue_tag(db: Database,
     """幂等二次确认命中（早退）时补摘队列标签，避免残留「未分类」。"""
     with db.connect() as conn:
         conn.execute(
-            "INSERT INTO asset_records (asset_id, source, status, dry_run) "
-            "VALUES ('done-asset', 'poll', 'ok', 0)")
+            "INSERT INTO asset_records (asset_id, source, status, dry_run, applied_at) "
+            "VALUES ('done-asset', 'poll', 'ok', 0, datetime('now'))")
     parent = jobs.create_job(db, "scan", {})
     jobs.claim_next(db)                    # 父 → running
     child_id = jobs.create_job(db, "classify_item",
@@ -391,7 +393,8 @@ def test_classify_item_lease_conflict_retries_not_failed(db: Database,
         with db_.connect() as conn:
             conn.execute(
                 "INSERT INTO asset_records (asset_id, job_id, source, status, "
-                "dry_run) VALUES (?, ?, 'poll', 'ok', 0)", (asset_id, parent))
+                "dry_run, applied_at) VALUES (?, ?, 'poll', 'ok', 0, "
+                "datetime('now'))", (asset_id, parent))
         return err(asset_id)               # status="error"
 
     monkeypatch.setattr(executor_module, "classify_asset", _side_effect_recorder)
@@ -632,8 +635,8 @@ def test_scan_total_is_candidate_count_and_skips_done(db: Database,
     # a1 已有非 dry_run 的 ok 记录 → "已完成"
     with db.connect() as conn:
         conn.execute(
-            "INSERT INTO asset_records (asset_id, source, status, dry_run) "
-            "VALUES ('a1', 'poll', 'ok', 0)")
+            "INSERT INTO asset_records (asset_id, source, status, dry_run, applied_at) "
+            "VALUES ('a1', 'poll', 'ok', 0, datetime('now'))")
     job_id = jobs.create_job(db, "scan", {"source": "poll"})
     job = jobs.claim_next(db)
     assert job is not None and job.id == job_id
@@ -696,8 +699,9 @@ def test_resumed_scan_only_processes_remaining(db: Database,
     with db.connect() as conn:
         for aid in ("a1", "a2"):
             conn.execute(
-                "INSERT INTO asset_records (asset_id, source, status, dry_run) "
-                "VALUES (?, 'poll', 'ok', 0)", (aid,))
+                "INSERT INTO asset_records (asset_id, source, status, dry_run, "
+                "applied_at) VALUES (?, 'poll', 'ok', 0, datetime('now'))",
+                (aid,))
     job_id = jobs.create_job(db, "scan", {})
     with db.connect() as conn:
         conn.execute("UPDATE jobs SET status='running', done=2, total=4 "
@@ -869,6 +873,18 @@ def test_build_pipeline_config_empty_tags_allowed(db: Database) -> None:
     assert cfg.tags == []
     assert cfg.queue_tag_name == "未分类"     # settings 默认
     assert cfg.default_min_confidence == 0.8  # settings 默认
+
+
+def test_build_pipeline_config_carries_on_refusal_marker_rule(db: Database) -> None:
+    """on_refusal 规则（拒答时打 failed 标签）必须原样进 cfg.marker_rules，
+    否则 parse 层拿不到它，拒答的图就不会被打标。"""
+    from app.store.crud import insert_marker_rule, insert_tag
+
+    tag_id = insert_tag(db, name="识别失败", kind="marker", description="")
+    insert_marker_rule(db, marker_tag_id=tag_id, condition={"on_refusal": True})
+
+    cfg = build_pipeline_config(db)
+    assert ("识别失败", {"on_refusal": True}) in cfg.marker_rules
 
 
 # ------------------------------------------------- dispatch（真机回归：Task 8 抓到的坑）
@@ -1141,8 +1157,8 @@ def test_semantics_manual_override_with_ok_record_skipped_by_already_done(
                         lambda client, db, tag, rules: ["a1"])
     with db.connect() as conn:
         conn.execute(
-            "INSERT INTO asset_records (asset_id, source, status, dry_run) "
-            "VALUES ('a1', 'poll', 'ok', 0)")
+            "INSERT INTO asset_records (asset_id, source, status, dry_run, applied_at) "
+            "VALUES ('a1', 'poll', 'ok', 0, datetime('now'))")
         conn.execute(
             "INSERT INTO asset_state (asset_id, manual_override) "
             "VALUES ('a1', 1)")
@@ -1212,7 +1228,8 @@ def test_backfill_skips_already_done_not_in_total(db, monkeypatch):
 
     with db.connect() as conn:
         conn.execute("INSERT INTO asset_records (asset_id, source, status, "
-                     "dry_run) VALUES ('a-1', 'poll', 'ok', 0)")
+                     "dry_run, applied_at) "
+                     "VALUES ('a-1', 'poll', 'ok', 0, datetime('now'))")
     jid = jobs.create_job(db, "backfill", {})
     run_job(db, FakeClient(), None, jobs.get_job(db, jid))
 
@@ -1342,8 +1359,9 @@ def test_reset_dispatch_runs_steps_and_finishes(db, monkeypatch):
     seen: dict = {}
     monkeypatch.setattr(
         executor_module, "run_reset_steps",
-        lambda db, client, *, job_id, is_canceled: (
-            seen.update(job_id=job_id, cancel_fn=is_canceled) or steps))
+        lambda db, client, *, job_id, is_canceled, dimensions=None: (
+            seen.update(job_id=job_id, cancel_fn=is_canceled,
+                        dimensions=dimensions) or steps))
     jid = jobs.create_job(db, "reset", {})
     run_job(db, object(), None, jobs.get_job(db, jid))
 
@@ -1351,8 +1369,15 @@ def test_reset_dispatch_runs_steps_and_finishes(db, monkeypatch):
     assert row.status == "done"
     assert seen["job_id"] == jid
     assert callable(seen["cancel_fn"])
+    assert seen["dimensions"] is None      # params={} → None（向后兼容，等价全集）
     types = event_types(db)
     assert "job_started" in types and "job_complete" in types
+
+    # params 带 dimensions → 解析成集合后原样下传
+    jid2 = jobs.create_job(db, "reset", {"dimensions": ["rating"]})
+    run_job(db, object(), None, jobs.get_job(db, jid2))
+    assert jobs.get_job(db, jid2).status == "done"
+    assert seen["dimensions"] == {"rating"}
 
 
 def test_reset_dispatch_unexpected_exception_fails_job(db, monkeypatch):
@@ -1424,8 +1449,8 @@ def test_scan_heals_stuck_queue_tag(db: Database, monkeypatch) -> None:
 
     with db.connect() as conn:
         conn.execute(
-            "INSERT INTO asset_records (asset_id, source, status, dry_run) "
-            "VALUES ('a1', 'poll', 'ok', 0)")
+            "INSERT INTO asset_records (asset_id, source, status, dry_run, applied_at) "
+            "VALUES ('a1', 'poll', 'ok', 0, datetime('now'))")
     job_id = jobs.create_job(db, "scan", {"source": "poll"})
     job = jobs.get_job(db, job_id)
 
@@ -1459,8 +1484,8 @@ def test_scan_heal_failure_does_not_break_scan(db: Database, monkeypatch) -> Non
 
     with db.connect() as conn:
         conn.execute(
-            "INSERT INTO asset_records (asset_id, source, status, dry_run) "
-            "VALUES ('a1', 'poll', 'ok', 0)")
+            "INSERT INTO asset_records (asset_id, source, status, dry_run, applied_at) "
+            "VALUES ('a1', 'poll', 'ok', 0, datetime('now'))")
     job_id = jobs.create_job(db, "scan", {"source": "poll"})
     job = jobs.claim_next(db)
     assert job is not None and job.id == job_id
@@ -1477,3 +1502,82 @@ def test_scan_heal_failure_does_not_break_scan(db: Database, monkeypatch) -> Non
     assert rec.calls == ["a2"]
     row = jobs.get_job(db, job_id)
     assert row.status == "done"
+
+
+def test_default_prompt_template_declares_new_contract():
+    from app.engine.executor import DEFAULT_PROMPT_TEMPLATE
+    assert "description" in DEFAULT_PROMPT_TEMPLATE
+    assert "rating" in DEFAULT_PROMPT_TEMPLATE
+    assert "{{TAG_LIST}}" in DEFAULT_PROMPT_TEMPLATE        # 强制占位符仍在
+    # description 必须排在 tag 之前（Visual CoT，D3）
+    assert DEFAULT_PROMPT_TEMPLATE.index("description") < DEFAULT_PROMPT_TEMPLATE.index('"tag"')
+
+
+# -------------------------------------------「已完成」口径（Task 10）
+
+
+def test_already_done_uses_latest_record(db: Database) -> None:
+    """旧的已应用记录 + 新的失败记录 → 必须判"未完成"，否则失败那次永不重试。"""
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO asset_records (asset_id, source, status, dry_run, "
+            "  created_at, applied_at) VALUES "
+            "('a1','poll','ok',0,'2026-01-01 00:00:00','2026-01-01 00:00:01'),"
+            "('a1','manual','ok',0,'2026-02-01 00:00:00',NULL)")
+    assert _already_done(db, "a1") is False
+
+
+def test_already_done_true_when_applied(db: Database) -> None:
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO asset_records (asset_id, source, status, dry_run, "
+            "  created_at, applied_at) VALUES "
+            "('a1','poll','ok',0,'2026-01-01 00:00:00','2026-01-01 00:00:01')")
+    assert _already_done(db, "a1") is True
+
+
+def test_already_done_false_when_applied_at_missing(db: Database) -> None:
+    """status='ok' 但没 applied_at = apply 失败挂起 → 必须重试。"""
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO asset_records (asset_id, source, status, dry_run) "
+            "VALUES ('a1','poll','ok',0)")
+    assert _already_done(db, "a1") is False
+
+
+def test_already_done_true_when_retries_exhausted(db: Database) -> None:
+    """§7.3：放弃重试也是终态，否则永久失败的资产会无限重跑。"""
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO asset_records (asset_id, source, status, dry_run) "
+            "VALUES ('a1','poll','ok',0)")
+        conn.execute("INSERT INTO asset_state (asset_id, apply_attempts) "
+                     "VALUES ('a1', 3)")
+    assert _already_done(db, "a1") is True
+
+
+# --------------------------------------- Effectors: pipeline config（Task 15）
+
+
+def test_pipeline_config_carries_effect_settings(db: Database) -> None:
+    """非默认值：只有 build_pipeline_config 真的读了 settings 才可能通过。"""
+    settings = SettingsStore(db)
+    settings.set("enabled_effects", ["tag", "rating"])
+    settings.set("apply_max_attempts", 7)
+    settings.set("skip_marker_tag_name", "我改过的名字")
+
+    cfg = build_pipeline_config(db)
+    assert cfg.enabled_effects == {"tag", "rating"}
+    assert cfg.apply_max_attempts == 7
+    assert cfg.skip_marker_tag_name == "我改过的名字"
+
+
+def test_pipeline_config_effect_defaults(db: Database) -> None:
+    """未配置时的兜底：全局效应器三个全开 + 上限 3 + 按 zh 解析标记名。
+
+    评分/描述不在 enabled_effects 里 —— 它们按标签控制（v12）。
+    """
+    cfg = build_pipeline_config(db)
+    assert cfg.enabled_effects == {"tag", "visibility", "album"}
+    assert cfg.apply_max_attempts == 3
+    assert cfg.skip_marker_tag_name == "保留人工信息"

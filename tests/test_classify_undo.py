@@ -32,6 +32,7 @@ class FakeClient:
         self.visibility_calls: list[tuple[str, str]] = []   # (asset_id, visibility)
         self.remove_album_calls: list[tuple[str, str]] = [] # (album_id, asset_id)
         self.add_album_calls: list[tuple[str, str]] = []
+        self.set_props_calls: list[dict] = []       # {"asset_id": ..., **props}
 
     def _next_id(self) -> str:
         self._next += 1
@@ -73,6 +74,10 @@ class FakeClient:
         for a in asset_ids:
             self.remove_album_calls.append((album_id, a))
 
+    def set_asset_properties(self, asset_ids: list[str], **props) -> None:
+        for a in asset_ids:
+            self.set_props_calls.append({"asset_id": a, **props})
+
 
 def seed_apply_log(db: Database, job_id: int, rows: list[tuple[str, str, dict]]) -> None:
     """按给定顺序写 apply change_log（id 递增 = 应用顺序）。"""
@@ -86,12 +91,15 @@ def seed_apply_log(db: Database, job_id: int, rows: list[tuple[str, str, dict]])
 
 
 def seed_state(db: Database, asset_id: str, *, tag: str | None, markers: list[str],
-               visibility: str | None, manual_override: int = 0) -> None:
+               visibility: str | None, manual_override: int = 0,
+               rating: int | None = None, description: str | None = None) -> None:
     with db.connect() as conn:
         conn.execute(
             "INSERT INTO asset_state (asset_id, current_tag, current_markers, "
-            "visibility, manual_override) VALUES (?, ?, ?, ?, ?)",
-            (asset_id, tag, json.dumps(markers), visibility, manual_override),
+            "visibility, manual_override, rating, description) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (asset_id, tag, json.dumps(markers), visibility, manual_override,
+             rating, description),
         )
 
 
@@ -107,7 +115,8 @@ def undo_log(db: Database, undo_job_id: int):
 def state_row(db: Database, asset_id: str):
     with db.connect() as conn:
         return conn.execute(
-            "SELECT current_tag, current_markers, visibility, manual_override "
+            "SELECT current_tag, current_markers, visibility, manual_override, "
+            "       rating, description "
             "FROM asset_state WHERE asset_id = ?", (asset_id,),
         ).fetchone()
 
@@ -277,3 +286,43 @@ def test_undo_timeline_restores_archive(db: Database) -> None:
     s.flush_state()
     assert client.visibility_calls == [("a-1", "archive")]
     assert state_row(db, "a-1")["visibility"] == "archive"
+
+
+def test_undo_rating_restores_old_and_swaps_payload(db: Database) -> None:
+    seed_apply_log(db, 1, [("rating_set", "a-1", {"old": None, "new": 4})])
+    client = FakeClient()
+    s = UndoSession(db, client, undo_job_id=2)
+    for r in s.load_rows(1):
+        assert s.undo_row(r) is True
+    s.flush_state()
+
+    assert client.set_props_calls == [{"asset_id": "a-1", "rating": None}]
+    (row,) = undo_log(db, 2)
+    assert row["action"] == "rating_set"
+    assert json.loads(row["payload"]) == {"old": 4, "new": None}   # 已对调
+
+
+def test_undo_description_empty_string_when_old_absent(db: Database) -> None:
+    """description 类型是 str | Unset，**没有 None** —— 清空只能传 ""。"""
+    seed_apply_log(db, 1, [("description_set", "a-1", {"old": "", "new": "一只猫"})])
+    client = FakeClient()
+    s = UndoSession(db, client, undo_job_id=2)
+    for r in s.load_rows(1):
+        assert s.undo_row(r) is True
+    assert client.set_props_calls == [{"asset_id": "a-1", "description": ""}]
+
+
+def test_undo_syncs_asset_state_metadata(db: Database) -> None:
+    seed_state(db, "a-1", tag="cat", markers=[], visibility="timeline",
+               rating=4, description="一只猫")
+    seed_apply_log(db, 1, [("rating_set", "a-1", {"old": None, "new": 4}),
+                           ("description_set", "a-1", {"old": "", "new": "一只猫"})])
+    client = FakeClient()
+    s = UndoSession(db, client, undo_job_id=2)
+    for r in s.load_rows(1):
+        s.undo_row(r)
+    s.flush_state()
+
+    row = state_row(db, "a-1")
+    assert row["rating"] is None and row["description"] == ""
+    assert row["current_tag"] == "cat"      # 未涉及的列原样保留
