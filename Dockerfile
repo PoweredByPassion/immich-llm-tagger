@@ -16,8 +16,10 @@ COPY Makefile tailwind.config.js ./
 
 # 2) 仅构建期使用的代码生成器，不进入运行时依赖。
 #    --mount=type=cache：wheel 缓存持久在 BuildKit 缓存卷，重复 build 不重新下载。
+#    Pinned below 0.30: it generates code on top of httpx2, while app/clients
+#    passes httpx.Timeout objects into the generated client.
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install openapi-python-client
+    pip install "openapi-python-client>=0.29.1,<0.30"
 
 # 3) 容器内无 .venv，必须覆盖 Makefile 的默认解释器
 RUN make generate PYTHON=python
