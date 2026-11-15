@@ -2,9 +2,10 @@
 {% block title %}{{ tr("config.tabs.sub_webhook") }} - Immich LLM Tagger{% endblock %}
 {% block page_title %}{{ tr("config.tabs.sub_webhook") }}{% endblock %}
 {% block content %}
-<div class="max-w-4xl space-y-6">
+<div class="space-y-6">
   {% include "config/_tabs.html" %}
 
+  <div class="max-w-4xl space-y-6">
   <div>
     <h1 class="text-xl font-semibold tracking-tight text-[#f1f3f9]">{{ tr("config.tabs.sub_webhook") }}</h1>
     <p class="text-xs text-zinc-400 mt-1">{{ tr("config.poll.webhook_desc") }}</p>
@@ -105,6 +106,7 @@
   <div class="card p-5 text-xs text-[#8a8f98] leading-relaxed space-y-1.5">
     <div class="font-medium text-[#f1f3f9]">{{ tr("config.poll.trigger_title") }}</div>
     <p>{{ tr("config.poll.trigger_desc_before") }} <code class="font-mono text-indigo-400">AssetTagged</code>{{ tr("config.poll.trigger_desc_after") }}</p>
+  </div>
   </div>
 </div>
 {% endblock %}
