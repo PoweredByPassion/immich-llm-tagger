@@ -200,3 +200,58 @@ def test_pool_runs_children_concurrently(db_path: str) -> None:
     pool.stop()
 
     assert in_flight["max"] == n
+
+
+def test_worker_survives_claim_next_db_error(db_path: str,
+                                             monkeypatch) -> None:
+    """claim_next raising (e.g. transient `database is locked`) must not kill
+    the worker thread. Regression: dead workers left a scan stuck in 'queued'
+    forever, and the scheduler stopped enqueuing because a scan was 'active'."""
+    import sqlite3
+
+    real_claim = jobs.claim_next
+    failures = {"left": 2}
+
+    def flaky_claim(db):
+        if failures["left"] > 0:
+            failures["left"] -= 1
+            raise sqlite3.OperationalError("database is locked")
+        return real_claim(db)
+
+    monkeypatch.setattr(pool_module.jobs, "claim_next", flaky_claim)
+    ex = FakeExecutor()
+    pool = WorkerPool(db_path, size=1, executor=ex, poll_seconds=0.02)
+    pool.start()
+    assert wait_until(lambda: failures["left"] == 0)
+
+    jid = jobs.create_job(Database(db_path), "scan", {"source": "poll"})
+    assert wait_until(lambda: [c[0] for c in ex.calls] == [jid])
+    pool.stop()
+
+
+def test_worker_survives_db_error_while_reporting_job_failure(db_path: str,
+                                                              monkeypatch) -> None:
+    """If the executor fails and logging that failure also hits a DB error,
+    the worker must still live on and claim the next job."""
+    import sqlite3
+
+    real_log = pool_module.events.log_event
+    failures = {"left": 1}
+
+    def flaky_log(*args, **kwargs):
+        if failures["left"] > 0:
+            failures["left"] -= 1
+            raise sqlite3.OperationalError("database is locked")
+        return real_log(*args, **kwargs)
+
+    monkeypatch.setattr(pool_module.events, "log_event", flaky_log)
+    ex = FakeExecutor(exc=RuntimeError("boom"))
+    db = Database(db_path)
+    jobs.create_job(db, "single", {"asset_id": "a1"})
+    jid2 = jobs.create_job(db, "single", {"asset_id": "a2"})
+
+    pool = WorkerPool(db_path, size=1, executor=ex, poll_seconds=0.02)
+    pool.start()
+    assert wait_until(lambda: jobs.get_job(db, jid2).status == "failed")
+    pool.stop()
+    assert len(ex.calls) == 2
