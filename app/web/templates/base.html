@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="{{ 'zh-CN' if lang() == 'zh' else 'en' }}" class="dark">
+<html lang="{% if lang() == 'zh' %}zh-CN{% elif lang() == 'en' %}en{% else %}ru{% endif %}" class="dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -35,7 +35,7 @@
 
     <!-- 左侧固定侧边栏 (256px) -->
     <aside :class="sidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'"
-           class="fixed inset-y-0 left-0 z-50 w-64 bg-[#0d0f14] border-r border-[#20232d] flex flex-col transition-transform duration-200 lg:static lg:translate-x-0">
+           class="fixed inset-y-0 left-0 z-50 w-64 bg-[#0d0f14] border-r border-[#20232d] flex flex-col transition-transform duration-200 lg:sticky lg:top-0 lg:h-[100dvh] lg:translate-x-0">
       
       <!-- 品牌标识 -->
       <div class="h-16 px-4 border-b border-[#20232d] flex items-center justify-between">
@@ -135,9 +135,10 @@
           <span class="px-2 py-0.5 rounded bg-[#181b24] font-mono text-xs text-zinc-200 font-medium" id="tz-offset-badge">{{ tr("base.tz.local") }}</span>
         </div>
         <div class="mt-1 text-xs text-zinc-400 truncate">{{ tr("base.tz.basis") }}</div>
-        <!-- 语言切换：写 cookie 后整页刷新（无需新增路由，模板侧 tr() 读 cookie 生效） -->
-        <button onclick="document.cookie='lang={{ 'en' if lang() == 'zh' else 'zh' }};path=/;max-age=31536000';location.reload()"
-                class="mt-3 w-full flex items-center justify-center py-1.5 rounded text-xs font-medium bg-[#181b24] border border-[#20232d] text-zinc-300 hover:text-white hover:bg-[#13151c] transition">{{ 'EN' if lang() == 'zh' else '中文' }}</button>
+        <!-- Language switch: dropdown writes the cookie, then reloads the page (template-side tr() reads the cookie) -->
+        {% with lang_switch_class = "mt-3 w-full" %}
+        {% include "_lang_switch.html" %}
+        {% endwith %}
       </div>
     </aside>
 

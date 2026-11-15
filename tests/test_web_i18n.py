@@ -53,6 +53,7 @@ def test_t_missing_key_falls_back_to_key():
 def test_lang_from_cookie():
     from app.web.i18n import lang_from_cookie
     assert lang_from_cookie({"lang": "en"}) == "en"
+    assert lang_from_cookie({"lang": "ru"}) == "ru"
     assert lang_from_cookie({}) == "zh"
     assert lang_from_cookie({"lang": "fr"}) == "zh"
 
@@ -72,6 +73,7 @@ def test_lang_cookie_switches_html_lang(client):
     """端到端：真路由渲染时 request 确实进了模板 context（防 legacy 签名回归）。"""
     assert '<html lang="en"' in client.get("/", cookies={"lang": "en"}).text
     assert '<html lang="zh-CN"' in client.get("/", cookies={"lang": "zh"}).text
+    assert '<html lang="ru"' in client.get("/", cookies={"lang": "ru"}).text
 
 
 def test_every_entry_has_both_languages():
@@ -80,6 +82,7 @@ def test_every_entry_has_both_languages():
     for key, entry in i18n._DICTIONARY.items():
         assert entry.get("zh"), key
         assert entry.get("en"), key
+        assert entry.get("ru"), key
 
 
 def _referenced_keys() -> set[str]:
@@ -187,6 +190,19 @@ def test_english_render_has_no_cjk(client):
         assert not leftover, f"{url} 英文渲染残留中文: {leftover!r}"
 
 
+def test_russian_render_has_no_cjk(client):
+    """Visible text of every page under lang=ru must not contain leftover CJK characters.
+
+    「中文」 on the language button is the target language's endonym; it is stripped the same way as in the English gatekeeper.
+    """
+    c = client
+    jid = jobs_store.create_job(c.app.state.db, "single", params={"asset_id": "x"})
+    for url in [*_PAGE_ROUTES, f"/jobs/{jid}", "/login"]:
+        html = c.get(url, cookies={"lang": "ru"}).text
+        leftover = "".join(_CJK.findall(_visible_text(html)))
+        assert not leftover, f"{url} Russian render has leftover CJK characters: {leftover!r}"
+
+
 def test_english_render_has_no_broken_artifacts(client):
     """钉死 prefix/suffix 拼接回归：缺空格、重复词、CJK 标点泄漏。"""
     c = client
@@ -210,14 +226,14 @@ def test_dictionary_percent_placeholders_match():
     """zh/en 的 %s 占位符数量必须一致（防翻译时漏参/多参）。"""
     from app.web import i18n
     for key, entry in i18n._DICTIONARY.items():
-        assert entry["zh"].count("%s") == entry["en"].count("%s"), key
+        assert entry["zh"].count("%s") == entry["en"].count("%s") == entry["ru"].count("%s"), key
 
 
 def test_dictionary_has_no_bare_percent():
     """字典值里除 %s 外不得出现裸 %（防意外触发 % 格式化）。"""
     from app.web import i18n
     for key, entry in i18n._DICTIONARY.items():
-        for lang in ("zh", "en"):
+        for lang in ("zh", "en", "ru"):
             assert "%" not in entry[lang].replace("%s", ""), (key, lang)
 
 
@@ -228,6 +244,7 @@ def test_retry_pending_has_two_placeholders():
     entry = i18n._DICTIONARY["assets.retry_pending"]
     assert entry["zh"].count("%s") == 2
     assert entry["en"].count("%s") == 2
+    assert entry["ru"].count("%s") == 2
 
 
 def test_task16_new_keys_present():

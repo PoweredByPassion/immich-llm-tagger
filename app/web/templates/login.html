@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="{{ 'zh-CN' if lang() == 'zh' else 'en' }}" class="dark">
+<html lang="{% if lang() == 'zh' %}zh-CN{% elif lang() == 'en' %}en{% else %}ru{% endif %}" class="dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -7,6 +7,7 @@
   <link rel="icon" type="image/png" href="/static/img/favicon.png">
   <link rel="apple-touch-icon" href="/static/img/apple-touch-icon.png">
   <link rel="stylesheet" href="/static/tailwind.css">
+  <script src="/static/alpine.min.js" defer></script>
 </head>
 <body class="min-h-[100dvh] bg-[#090a0f] text-zinc-100 antialiased font-sans flex items-center justify-center p-4">
 
@@ -36,6 +37,10 @@
         {{ tr("auth.submit") }}
       </button>
     </form>
+
+    {% with lang_switch_class = "mt-4 mx-auto w-40", lang_switch_dropup = false %}
+    {% include "_lang_switch.html" %}
+    {% endwith %}
   </div>
 
 </body>
