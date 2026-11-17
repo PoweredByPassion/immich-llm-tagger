@@ -11,7 +11,7 @@
 [![Docker](https://img.shields.io/badge/Docker-Ready-blue.svg)](docker-compose.yml)
 [![FastAPI](https://img.shields.io/badge/FastAPI-Framework-green.svg)](https://fastapi.tiangolo.com)
 
-**[English](README.md)** | **[简体中文](README.zh-CN.md)**
+**[English](README.md)** | **[简体中文](README.zh-CN.md)** | **[Русский](README.ru.md)**
 
 </div>
 
