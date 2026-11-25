@@ -213,10 +213,10 @@ def test_visibility_timeline_branch_with_system_archive():
     assert vis[0].payload == {"from_visibility": "archive"}
 
 
-def test_visibility_timeline_defaults_from_archive():
+def test_visibility_timeline_preserves_unknown_remote_state():
     effects, _ = _plan(_ctx(archive=False),        # snapshot visibility=None
                        has_system_archive=True)
-    assert _visibility(effects)[0].payload == {"from_visibility": "archive"}
+    assert _visibility(effects) == []
 
 
 def test_visibility_noop_when_already_archive():

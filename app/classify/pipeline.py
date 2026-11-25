@@ -6,30 +6,46 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from ipaddress import ip_address
+from urllib.parse import urlsplit
 
-from app.classify.commit import CommitResult, commit_effects
+from app.classify.commit import (
+    CommitResult,
+    commit_effects,
+    pending_effects_record,
+    retire_pending_effects,
+)
 from app.classify.effectors import plan_all
 from app.classify.effectors.base import Effect, EffectContext, Gates, PlanOutcome
 from app.classify.lease import LLM_MAX_RETRIES, claim, lease_seconds_for, release, renew
 from app.classify.parse import (
     decide_archive,
     extract_json,
+    is_refusal,
     normalize,
     refusal_marker_names,
 )
 from app.classify.prompt import PromptContext, render_prompt
 from app.classify.snapshot import AssetSnapshot
 from app.classify.thumb import ThumbConfig, fetch_and_encode
+from app.clients.immich import ImmichError
+from app.clients.llm import LLMError
 from app.db.connection import Database
 from app.store.assets import (
-    bumped_apply_attempts, has_system_archive, last_written_value,
+    bumped_apply_attempts,
+    has_system_archive,
+    last_written_value,
+    processing_complete,
     write_changes_and_state,
 )
 from app.store.connections import LLMConn
 from app.store.events import log_event
 from app.store.tags import TagDef
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -52,6 +68,10 @@ class PipelineConfig:
     enabled_effects: frozenset[str] = frozenset({"tag", "visibility", "album"})
     skip_marker_tag_name: str = "保留人工信息"
     apply_max_attempts: int = 3
+    prompt_version_id: int | None = None
+    retain_model_payloads: bool = True
+    allow_cloud_images: bool = True
+    sensitive_marker_tag_name: str = "sensitive"
 
 
 @dataclass(frozen=True)
@@ -62,47 +82,62 @@ class PipelineResult:
     markers: tuple[str, ...]
     status: str  # "ok" | "refused" | "error"
     dry_run: bool
+    apply_status: str | None = None
+    apply_error: str | None = None
 
-
-_ERROR = PipelineResult  # 仅用于构造错误结果的别名
-
-
-def _error_result(asset_id: str, dry_run: bool) -> PipelineResult:
-    return _ERROR(asset_id=asset_id, tag="", confidence=None, markers=(),
-                  status="error", dry_run=dry_run)
+    @property
+    def failed(self) -> bool:
+        return self.status == "error" or self.apply_status in {"pending", "failed"}
 
 
 def _unrecoverable(exc: BaseException) -> bool:
-    """整张图"重试一万次也一样"的失败？看状态码，不看异常类型名。
-
-    4xx = 这次请求本身有问题：Immich 侧媒体缺失/不可读（0 字节的 HEIC → 缩略图
-    404），或 LLM 侧把图片/参数拒了。两者都不会因为重试而改变。
-    5xx / 429 / 超时 / 网络 = 暂态，保持无限重试（上游恢复了就该成功）。
-    """
+    """Only a missing or unreadable Immich asset consumes its failure budget."""
     code = getattr(exc, "status_code", None)
-    return isinstance(code, int) and 400 <= code < 500
+    return isinstance(exc, ImmichError) and code in {404, 410, 422}
+
+
+def _metadata_hint(dto):
+    raw = getattr(dto, "exif_info", None)
+    if hasattr(raw, "to_dict"):
+        exif = raw.to_dict()
+    elif isinstance(raw, dict):
+        exif = raw
+    else:
+        exif = getattr(raw, "__dict__", None)
+    date = getattr(dto, "local_date_time", None)
+    return {
+        "originalFileName": getattr(dto, "original_file_name", None),
+        "exifInfo": exif,
+        "localDateTime": date.isoformat() if hasattr(date, "isoformat") else date,
+    }
 
 
 def _asset_meta(client, asset_id: str, asset_hint: dict | None):
-    """有 hint 用 hint（webhook 携带，不重复查 Immich），否则回退 get_asset。"""
-    if asset_hint is not None:
-        return (
-            asset_hint.get("originalFileName"),
-            asset_hint.get("exifInfo"),
-            asset_hint.get("localDateTime"),
-        )
-    dto = client.get_asset(asset_id)
-    raw = dto.exif_info
-    exif: dict | None = None
-    if raw is not None:
-        if hasattr(raw, "to_dict"):
-            exif = raw.to_dict()
-        elif isinstance(raw, dict):
-            exif = raw
-        else:
-            exif = vars(raw)
-    date = getattr(dto, "local_date_time", None)
-    return dto.original_file_name, exif, date.isoformat() if date else None
+    metadata = asset_hint if asset_hint is not None else _metadata_hint(client.get_asset(asset_id))
+    return metadata.get("originalFileName"), metadata.get("exifInfo"), metadata.get("localDateTime")
+
+
+def _local_model(url: str) -> bool:
+    host = urlsplit(url).hostname
+    if host in {"localhost", "host.docker.internal"}:
+        return True
+    try:
+        address = ip_address(host or "")
+    except ValueError:
+        return False
+    return address.is_loopback or address.is_private
+
+
+def _check_model_connection(db, cfg, llm, *, dry_run):
+    endpoint = getattr(llm, "base_url", cfg.llm.base_url)
+    if cfg.llm.multimodal and not cfg.allow_cloud_images and not _local_model(endpoint):
+        raise LLMError("Sending images to a remote model is disabled. Review model privacy settings.")
+    if dry_run:
+        return
+    from app.store.settings import SettingsStore
+    reason = SettingsStore(db).get("llm_paused_reason")
+    if reason:
+        raise LLMError(reason)
 
 
 def _messages(prompt: str, image_b64: str | None) -> list[dict]:
@@ -162,38 +197,89 @@ def classify_asset(
     asset_hint: dict | None = None,
     override_manual: bool | None = None,
     allow_metadata_overwrite: bool | None = None,
+    force_reanalysis: bool = False,
+    lease_held: bool = False,
+    replace_owned_tags: dict[str, str] | None = None,
+    replace_owned_albums: dict[str, str] | None = None,
+    auto_check: bool = False,
+    skip_completed: bool = False,
 ) -> PipelineResult:
     # 统一将 asset_id 收敛为 str，下游（租约/记录/Applier）全部按 str 处理。
     asset_id = str(asset_id)
     lease_seconds = lease_seconds_for(cfg.llm.timeout, LLM_MAX_RETRIES)
-    if not claim(db, asset_id, cfg.concurrency_owner, lease_seconds):
-        return _error_result(asset_id, dry_run)
+    if not lease_held and not claim(db, asset_id, cfg.concurrency_owner, lease_seconds):
+        return PipelineResult(asset_id, "", None, (), "busy", dry_run)
     try:
+        if skip_completed:
+            with db.connect() as conn:
+                if processing_complete(conn, asset_id):
+                    return PipelineResult(asset_id, "", None, (), "skipped", dry_run)
+        if auto_check:
+            from app.classify.scope import check_auto_eligibility
+            try:
+                eligible, reason, asset = check_auto_eligibility(client, db, asset_id)
+            except ImmichError as exc:
+                _write_record(db, asset_id, source=source, tag=None, confidence=None, markers=(),
+                              model=None, usage=None, status="error", raw_response=None, llm_request=None,
+                              dry_run=dry_run, job_id=job_id, prompt_version_id=prompt_version_id,
+                              duration_ms=0)
+                _analysis_failed(db, client, asset_id, exc, cfg,
+                                 dry_run=dry_run, job_id=job_id, automatic=True)
+                return PipelineResult(asset_id, "", None, (), "error", dry_run, apply_error=str(exc))
+            if not eligible:
+                retire_pending_effects(db, client, asset_id)
+                with db.connect() as conn:
+                    conn.execute(
+                        "UPDATE asset_state SET process_status=NULL, retry_after=NULL "
+                        "WHERE asset_id=? AND process_status='pending'", (asset_id,),
+                    )
+                log_event(db, "system", "asset_skipped",
+                          {"asset_id": asset_id, "reason": reason, "job_id": job_id})
+                return PipelineResult(asset_id, "", None, (), "skipped", dry_run)
+            asset_hint = _metadata_hint(asset)
+        if not dry_run and client is not None:
+            from app.classify.inverse import reconcile_pending_inverse
+            reconcile_pending_inverse(db, client, asset_id)
         return _process(db, client, llm, asset_id, cfg, source=source,
                         dry_run=dry_run, job_id=job_id,
                         prompt_version_id=prompt_version_id,
                         asset_hint=asset_hint, lease_seconds=lease_seconds,
                         override_manual=override_manual,
-                        allow_metadata_overwrite=allow_metadata_overwrite)
-    except Exception:
-        return _error_result(asset_id, dry_run)
+                        allow_metadata_overwrite=allow_metadata_overwrite,
+                        force_reanalysis=force_reanalysis, replace_owned_tags=replace_owned_tags,
+                        replace_owned_albums=replace_owned_albums, automatic=auto_check)
+    except Exception as exc:
+        logger.warning("Classification of %s failed: %s", asset_id, exc)
+        return PipelineResult(asset_id, "", None, (), "error", dry_run, apply_error=str(exc))
     finally:
-        release(db, asset_id, cfg.concurrency_owner)
+        if not lease_held:
+            release(db, asset_id, cfg.concurrency_owner)
 
 
 def _process(db, client, llm, asset_id, cfg, *, source, dry_run, job_id,
              prompt_version_id, asset_hint, lease_seconds,
-             override_manual, allow_metadata_overwrite=False) -> PipelineResult:
+             override_manual, allow_metadata_overwrite=False, force_reanalysis=False,
+             replace_owned_tags=None, replace_owned_albums=None, automatic=False) -> PipelineResult:
     started = time.monotonic()
     # 取图/渲染 prompt 阶段就失败时没有请求可记，error 路径留 None。
     request_snapshot: str | None = None
     filename = None
     # 重试复用（§7.3 层 1）：已有"分析成功但未应用"的记录时跳过 LLM。
-    reused = _reusable_analysis(db, asset_id) if not dry_run else None
+    pending = None if dry_run else pending_effects_record(db, asset_id)
+    if pending is not None and pending["job_id"] is None and pending["analysis_record_id"] is None:
+        retire_pending_effects(db, client, asset_id)
+        pending = None
+    resuming = pending is not None
+    reused = (_reusable_analysis(db, asset_id, include_refused=resuming,
+                                 record_id=pending["analysis_record_id"] if resuming else None)
+              if not dry_run and not force_reanalysis else None)
     if reused is not None:
-        cls, status, filename = reused["cls"], "ok", reused["filename"]
+        cls, status, filename = reused["cls"], reused["status"], reused["filename"]
+        record_id = (reused["id"] if job_id is not None and reused["job_id"] == job_id
+                     else _copy_analysis_record(db, reused["id"], job_id, source))
     else:
         try:
+            _check_model_connection(db, cfg, llm, dry_run=dry_run)
             # 未勾选多模态：不发图，也省掉一次取图（fetch_and_encode）。
             image_b64 = fetch_and_encode(client, asset_id, cfg.thumb) \
                 if cfg.llm.multimodal else None
@@ -205,9 +291,11 @@ def _process(db, client, llm, asset_id, cfg, *, source, dry_run, job_id,
                 date=date,
             ))
             messages = _messages(prompt, image_b64)
-            request_snapshot = _llm_request_snapshot(llm, messages)
+            if cfg.retain_model_payloads:
+                request_snapshot = _llm_request_snapshot(llm, messages)
             result = llm.chat(messages)
-            renew(db, asset_id, cfg.concurrency_owner, lease_seconds)
+            if not renew(db, asset_id, cfg.concurrency_owner, lease_seconds):
+                raise RuntimeError("Asset lease expired during model analysis")
         except Exception as exc:
             _write_record(db, asset_id, source=source, tag=None, confidence=None,
                           markers=(), model=None, usage=None, status="error",
@@ -215,35 +303,60 @@ def _process(db, client, llm, asset_id, cfg, *, source, dry_run, job_id,
                           dry_run=dry_run, job_id=job_id,
                           prompt_version_id=prompt_version_id,
                           duration_ms=_ms(started), filename=filename)
-            _analysis_failed(db, client, asset_id, exc, cfg,
-                             dry_run=dry_run, job_id=job_id)
-            return _error_result(asset_id, dry_run)
+            _analysis_failed(db, None if force_reanalysis else client, asset_id, exc, cfg,
+                             dry_run=dry_run, job_id=job_id, automatic=automatic)
+            return PipelineResult(asset_id, "", None, (), "error", dry_run, apply_error=str(exc))
 
         raw_text = result.content
         # extract_json 故意**不**套 try：解析期异常由 classify_asset 统一兜成
         # error（既有语义，test_post_llm_crash_becomes_error_and_releases 钉着）。
         raw = extract_json(raw_text)
+        valid = (raw is not None and isinstance(raw.get("tag"), str)
+                 and bool(raw["tag"].strip()) and isinstance(raw.get("confidence"), (float, int))
+                 and not isinstance(raw["confidence"], bool) and 0 <= raw["confidence"] <= 1)
+        known_tag = valid and raw["tag"] in {name for name, _ in _primary_names(cfg)}
         # raw is None 的两种情形（真拒答 / 不合契约）归一结果完全一致，
         # 原来分成两个分支是冗余，这里合并。
         cls = normalize(raw, refusal_text=None if raw is not None else raw_text,
                         enabled_primary_tags={n for n, _ in _primary_names(cfg)},
                         fallback_tag=cfg.fallback_tag,
-                        marker_rules=cfg.marker_rules)
-        status = "ok" if raw is not None else "refused"
+                        marker_rules=cfg.marker_rules,
+                        sensitive_marker=cfg.sensitive_marker_tag_name)
+        invalid = not valid and not is_refusal(raw_text)
+        status = "ok" if valid else "error" if invalid else "refused"
+        if invalid:
+            log_event(db, "system", "invalid_model_output",
+                      {"asset_id": asset_id, "job_id": job_id})
+            cls = normalize(None, refusal_text=None,
+                            enabled_primary_tags=set(), fallback_tag=cfg.fallback_tag,
+                            marker_rules=cfg.marker_rules)
+        if cls.sensitive:
+            cls = replace(cls, description=None)
 
-        _write_record(db, asset_id, source=source, tag=cls.tag,
+        record_id = _write_record(db, asset_id, source=source, tag=cls.tag,
                       confidence=cls.confidence, markers=cls.markers,
                       model=result.model, usage=result.usage, status=status,
-                      raw_response=raw_text, llm_request=request_snapshot,
+                      raw_response=raw_text if cfg.retain_model_payloads else None,
+                      llm_request=request_snapshot,
                       dry_run=dry_run, job_id=job_id,
                       prompt_version_id=prompt_version_id,
                       duration_ms=_ms(started), filename=filename,
-                      rating=cls.rating, description=cls.description)
+                      rating=cls.rating, description=cls.description,
+                      failure_kind="invalid_model_output" if invalid else None,
+                      pending=not dry_run and (known_tag or not force_reanalysis))
 
     if dry_run:
         return PipelineResult(asset_id=asset_id, tag=cls.tag,
                               confidence=cls.confidence, markers=cls.markers,
                               status=status, dry_run=True)
+
+    if force_reanalysis and not known_tag:
+        return PipelineResult(asset_id, cls.tag, cls.confidence, cls.markers,
+                              "error", False, apply_error="No valid new classification")
+
+    if force_reanalysis:
+        with db.connect() as conn:
+            conn.execute("UPDATE asset_state SET apply_attempts = 0 WHERE asset_id = ?", (asset_id,))
 
     selected = next((t for t in cfg.tags
                      if t.kind == "primary" and t.enabled and t.name == cls.tag), None)
@@ -288,18 +401,45 @@ def _process(db, client, llm, asset_id, cfg, *, source, dry_run, job_id,
     # 评分/描述与「忽略」解耦后，忽略标签也会产生 skipped（用户手写过评分），
     # 此时打标记就违背了「忽略」的承诺。判定结果同时喂给下面的 markers，
     # 免得 asset_state 记下一个根本没写进 Immich 的 marker。
-    skip_marker = bool(outcome.skipped) and not gates.skip_immich
-    if skip_marker:
+    skip_marker = bool(outcome.skipped) and not gates.skip_immich and "tag" in cfg.enabled_effects
+    if skip_marker and cfg.skip_marker_tag_name not in snapshot.tags:
         effects.append(Effect("tag_add", asset_id,
                               {"tag_name": cfg.skip_marker_tag_name,
                                "skipped": sorted(outcome.skipped)}))
 
-    queue_ids = client.ensure_tags([cfg.queue_tag_name])
+    tag_kinds = {item.name: item.kind for item in cfg.tags}
+    if "tag" in cfg.enabled_effects and not gates.blocks_all:
+        keep = {cls.tag, *cls.markers}
+        if skip_marker:
+            keep.add(cfg.skip_marker_tag_name)
+        current_ids = dict(snapshot.tag_ids)
+        for name, tag_id in sorted((replace_owned_tags or {}).items()):
+            if name not in keep and current_ids.get(name) == tag_id:
+                effects.append(Effect("tag_remove", asset_id, {"tag_name": name, "tag_id": tag_id}))
+    if "album" in cfg.enabled_effects and not gates.organization_blocked:
+        target = selected.album if selected else None
+        for name, album_id in (replace_owned_albums or {}).items():
+            if name != target:
+                effects.append(Effect("album_remove", asset_id,
+                                      {"album_name": name, "album_id": album_id}))
+    effects = [
+        Effect(item.action, asset_id, {**item.payload, "tag_kind": tag_kinds.get(
+            item.payload["tag_name"], "marker" if item.payload["tag_name"] != cls.tag else "primary"
+        )})
+        if item.action in {"tag_add", "tag_remove"} else item for item in effects
+    ]
+
     try:
+        queue_tag_id = None
+        if (not resuming or force_reanalysis) and cfg.queue_tag_name in snapshot.tags:
+            queue_tag_id = dict(snapshot.tag_ids).get(cfg.queue_tag_name)
+            if queue_tag_id is None:
+                queue_tag_id = client.ensure_tags([cfg.queue_tag_name])[cfg.queue_tag_name]
         result = commit_effects(
             db, client, effects, asset_id=asset_id, job_id=job_id,
-            queue_tag_id=queue_ids[cfg.queue_tag_name],
-            queue_tag_name=cfg.queue_tag_name, gates=gates)
+            queue_tag_id=queue_tag_id,
+            queue_tag_name=cfg.queue_tag_name, gates=gates, retain_completed=True,
+            supersede=force_reanalysis, analysis_record_id=record_id)
     except Exception as exc:          # noqa: BLE001
         # 提交器的**意外**异常（Immich 侧的正常失败走 CommitResult(ok=False)，
         # 不抛）。分类已成功且 asset_records 已落 —— 不改写"分类过"这个事实，
@@ -311,17 +451,34 @@ def _process(db, client, llm, asset_id, cfg, *, source, dry_run, job_id,
     markers = tuple(dict.fromkeys(
         [*cls.markers, *([cfg.skip_marker_tag_name] if skip_marker else [])]))
     if result.ok:
-        _mark_applied(db, asset_id)
+        apply_status = "applied"
+    elif result.conflict:
+        apply_status = "failed"
     else:
-        _apply_failed(db, client, asset_id, error=result.error,
-                      max_attempts=cfg.apply_max_attempts,
-                      skip_marker_tag_name=cfg.skip_marker_tag_name)
+        apply_status = _apply_failed(
+            db, client, asset_id, error=result.error, max_attempts=cfg.apply_max_attempts,
+            skip_marker_tag_name=cfg.skip_marker_tag_name,
+        )
     with db.connect() as conn:
+        conn.execute(
+            "UPDATE asset_records SET apply_status=?, apply_error=COALESCE(?, apply_error), "
+            "applied_at=CASE WHEN ? = 'applied' THEN datetime('now') END WHERE id=?",
+            (apply_status, result.error, apply_status, record_id),
+        )
+        conn.execute(
+            "UPDATE asset_state SET process_status=?, "
+            "retry_after=CASE WHEN ? = 'pending' THEN datetime('now', '+1 minute') END, "
+            "apply_attempts=CASE WHEN ? = 'applied' THEN 0 ELSE apply_attempts END WHERE asset_id=?",
+            (apply_status, apply_status, apply_status, asset_id),
+        )
+        if result.ok:
+            conn.execute("DELETE FROM pending_effects WHERE asset_id = ?", (asset_id,))
         _update_state(conn, asset_id=asset_id, job_id=job_id, tag=cls.tag,
                       markers=markers, snapshot=snapshot,
                       committed={e.action: e.payload for e in result.committed})
     return PipelineResult(asset_id=asset_id, tag=cls.tag, confidence=cls.confidence,
-                          markers=markers, status=status, dry_run=False)
+                          markers=markers, status=status, dry_run=False,
+                          apply_status=apply_status, apply_error=result.error)
 
 
 def _snapshot(client, asset_id: str) -> AssetSnapshot:
@@ -333,33 +490,6 @@ def _snapshot(client, asset_id: str) -> AssetSnapshot:
     验证、确认真带所需值时再启用。代价是每图多一次轻量 GET。
     """
     return AssetSnapshot.from_dto(client.get_asset(asset_id))
-
-
-def _mark_applied(db, asset_id: str) -> None:
-    """成功闸门通过：给**最新那条** dry_run=0 的记录补 applied_at（§7.1），
-    并把 asset_state.apply_attempts 归零。
-
-    口径必须与 `_already_done` 一致（同样取最新一条），否则重试场景会给
-    旧记录盖章、新记录仍无凭据 —— 而 _already_done 看的正是新记录。
-
-    apply_attempts 的语义是**连续失败次数**（§7.3）：只在失败时自增
-    （`_apply_failed` / `bumped_apply_attempts`），成功时必须清零，否则
-    「失败一次 → 下轮复用分析后应用成功」的资产会永远停在 1，详情页的
-    「待重试 (1/3)」胶囊成为永久假阳性（与按 applied_at 判定的失败清单矛盾）。
-    只在成功路径调用本函数，失败路径不经过这里。
-    """
-    with db.connect() as conn:
-        conn.execute(
-            "UPDATE asset_records SET applied_at = datetime('now') "
-            " WHERE id = (SELECT id FROM asset_records "
-            "              WHERE asset_id = ? AND dry_run = 0 "
-            "              ORDER BY created_at DESC, id DESC LIMIT 1)",
-            (asset_id,),
-        )
-        conn.execute(
-            "UPDATE asset_state SET apply_attempts = 0 WHERE asset_id = ?",
-            (asset_id,),
-        )
 
 
 def _update_state(conn, *, asset_id, job_id, tag, markers, snapshot,
@@ -397,16 +527,17 @@ def _update_state(conn, *, asset_id, job_id, tag, markers, snapshot,
 
 
 def _apply_failed(db, client, asset_id: str, *, error, max_attempts,
-                  skip_marker_tag_name: str) -> None:
+                  skip_marker_tag_name: str) -> str:
     """失败：不写 applied_at、不摘队列标签；计数 +1，达上限则放弃（§7.3）。"""
     n = bumped_apply_attempts(db, asset_id)
     if n < max_attempts:
         log_event(db, "system", "apply_retry",
                   {"asset_id": asset_id, "attempts": n, "error": error})
-        return
+        return "pending"
     log_event(db, "system", "apply_gave_up",
               {"asset_id": asset_id, "attempts": n, "error": error})
     _tag_gave_up(db, client, asset_id, skip_marker_tag_name)
+    return "failed"
 
 
 def _tag_gave_up(db, client, asset_id: str, tag_name: str) -> None:
@@ -431,7 +562,7 @@ def _tag_gave_up(db, client, asset_id: str, tag_name: str) -> None:
 
 def _analysis_failed(db, client, asset_id: str, exc: BaseException,
                      cfg: PipelineConfig, *, dry_run: bool,
-                     job_id: int | None) -> None:
+                     job_id: int | None, automatic: bool = False) -> None:
     """分析阶段失败：留痕 + 对不可恢复的失败做有限次重试后的终态处理。
 
     每张图各自一个 job、各自 apply —— 一张图失败不影响别的图（队列也不会因此
@@ -448,6 +579,18 @@ def _analysis_failed(db, client, asset_id: str, exc: BaseException,
     log_event(db, "system", "analysis_failed", {
         "asset_id": asset_id, "job_id": job_id, "error": str(exc),
         "unrecoverable": permanent, "dry_run": dry_run})
+    config_error = (isinstance(exc, LLMError) and exc.status_code in {400, 401, 403, 404, 422}
+                    or isinstance(exc, ImmichError) and exc.status_code in {401, 403})
+    if config_error and not dry_run:
+        from app.store.settings import SettingsStore
+        provider = "Model" if isinstance(exc, LLMError) else "Immich"
+        SettingsStore(db).set("llm_paused_reason", f"{provider} configuration rejected ({exc.status_code})")
+    if automatic and not dry_run:
+        with db.connect() as conn:
+            conn.execute(
+                "UPDATE asset_state SET process_status='pending', retry_after=datetime('now', '+1 minute') "
+                "WHERE asset_id=?", (asset_id,),
+            )
     if not permanent or dry_run or client is None:
         return
     attempts = bumped_apply_attempts(db, asset_id)
@@ -457,6 +600,9 @@ def _analysis_failed(db, client, asset_id: str, exc: BaseException,
         return
     log_event(db, "system", "analysis_gave_up",
               {"asset_id": asset_id, "attempts": attempts, "error": str(exc)})
+    with db.connect() as conn:
+        conn.execute("UPDATE asset_state SET process_status='failed', retry_after=NULL WHERE asset_id=?",
+                     (asset_id,))
     _tag_failed(db, client, asset_id, cfg)
 
 
@@ -498,16 +644,16 @@ def _ms(started: float) -> int:
 def _write_record(db, asset_id, *, source, tag, confidence, markers, model, usage,
                   status, raw_response, llm_request, dry_run, job_id,
                   prompt_version_id, duration_ms, filename=None,
-                  rating=None, description=None) -> None:
+                  rating=None, description=None, pending=False, failure_kind=None) -> int:
     with db.connect() as conn:
-        conn.execute(
+        cur = conn.execute(
             "INSERT INTO asset_records (asset_id, job_id, prompt_version_id, source, "
             "  predicted_tag, confidence, markers, model, usage, duration_ms, "
             "  status, raw_response, llm_request, dry_run, filename, "
-            "  rating, description) "
+            "  rating, description, apply_status, apply_error) "
             "VALUES (:aid, :job_id, :pv_id, :source, :tag, :conf, :markers, "
             "        :model, :usage, :dur, :status, :raw, :req, :dry, :fname, "
-            "        :rating, :desc)",
+            "        :rating, :desc, :apply_status, :apply_error)",
             {
                 "aid": asset_id, "job_id": job_id, "pv_id": prompt_version_id,
                 "source": source, "tag": tag, "conf": confidence,
@@ -518,11 +664,30 @@ def _write_record(db, asset_id, *, source, tag, confidence, markers, model, usag
                 "dry": 1 if dry_run else 0,
                 "fname": filename,
                 "rating": rating, "desc": description,
+                "apply_status": "pending" if pending else None,
+                "apply_error": failure_kind,
             },
         )
 
+        if pending:
+            conn.execute("UPDATE asset_state SET process_status='pending' WHERE asset_id=?", (asset_id,))
+        return cur.lastrowid
 
-def _reusable_analysis(db, asset_id: str):
+
+def _copy_analysis_record(db, original_id, job_id, source):
+    with db.connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO asset_records(asset_id, job_id, prompt_version_id, source, predicted_tag, "
+            "confidence, markers, model, status, filename, rating, description, analysis_record_id, apply_status) "
+            "SELECT asset_id, ?, prompt_version_id, ?, predicted_tag, confidence, markers, model, "
+            "status, filename, rating, description, COALESCE(analysis_record_id, id), 'pending' "
+            "FROM asset_records WHERE id=?",
+            (job_id, source, original_id),
+        )
+        return cur.lastrowid
+
+
+def _reusable_analysis(db, asset_id: str, *, include_refused: bool = False, record_id=None):
     """重试复用：返回上次已分析但未应用的判定（§7.3 层 1）。
 
     只在**最新一条记录**满足 `status='ok' AND dry_run=0 AND applied_at IS NULL`
@@ -534,13 +699,13 @@ def _reusable_analysis(db, asset_id: str):
 
     with db.connect() as conn:
         row = conn.execute(
-            "SELECT status, predicted_tag, confidence, markers, rating, "
+            "SELECT id, job_id, status, predicted_tag, confidence, markers, rating, "
             "       description, filename, applied_at "
-            "  FROM asset_records WHERE asset_id = ? AND dry_run = 0 "
+            "  FROM asset_records WHERE asset_id = ? AND dry_run = 0 AND (? IS NULL OR id=?) "
             " ORDER BY created_at DESC, id DESC LIMIT 1",
-            (asset_id,),
+            (asset_id, record_id, record_id),
         ).fetchone()
-    if (row is None or row["status"] != "ok"
+    if (row is None or (row["status"] != "ok" and not include_refused)
             or row["applied_at"] is not None
             or row["predicted_tag"] is None):
         return None
@@ -550,4 +715,5 @@ def _reusable_analysis(db, asset_id: str):
         sensitive="sensitive" in markers, reason=None, markers=tuple(markers),
         rating=row["rating"], description=row["description"],
     )
-    return {"cls": cls, "filename": row["filename"]}
+    return {"id": row["id"], "job_id": row["job_id"], "cls": cls,
+            "status": row["status"], "filename": row["filename"]}

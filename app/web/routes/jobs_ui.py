@@ -1,9 +1,4 @@
-"""任务页：列表 / 详情 / 取消 / 全局暂停开关 / SSE 单 job 进度。
-
-SSE 方案：持续推终态帧（简单方案）——每 1s 重查 get_job 推一帧，浏览器端
-htmx sse-swap 局部刷新数字；终态后帧内容不变，客户端断开即结束。
-不做"终态后主动关闭"（需要 generator 侧额外状态，收益小）。
-"""
+"""Task pages, actions, and live progress."""
 from __future__ import annotations
 
 import json
@@ -14,11 +9,11 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from app.db.connection import Database
-from app.store import jobs
+from app.store import events, jobs
 from app.store import assets
 from app.store.assets import query_records
 from app.store.settings import SettingsStore
-from app.web.sse import sse_response
+from app.web.sse import HtmlEvent, html_sse_response, sse_response
 
 router = APIRouter(prefix="/jobs")
 # SSE 端点在根路径 /api/sse/job/{id}（与 overview 的 /api/sse/overview 对齐），
@@ -139,14 +134,30 @@ async def jobs_pause(request: Request):
 def jobs_scan(request: Request):
     """顶栏"触发扫描"：入队 manual scan job（active 已存在则去重），回任务列表。"""
     db: Database = request.app.state.db
-    if not jobs.has_active_job_of_type(db, "scan"):
-        jobs.create_job(db, "scan", params={"source": "manual"})
+    jobs.enqueue_scan(db, {"source": "manual"})
     return RedirectResponse("/jobs", status_code=303)
 
 
 @sse_router.get("/api/sse/job/{job_id}", include_in_schema=False)
-def job_sse(request: Request, job_id: int):
+def job_sse(request: Request, job_id: int, view: str | None = None):
     db: Database = request.app.state.db
+
+    if view == "html":
+        templates = request.app.state.templates.env
+        progress = templates.get_template("jobs/_progress.html")
+        detail = templates.get_template("jobs/_detail_body.html")
+
+        def render(job: jobs.JobRow | None) -> HtmlEvent:
+            if job is None:
+                return HtmlEvent("job-result", "", final=True)
+            if job.status not in ("queued", "running"):
+                return HtmlEvent(
+                    "job-result", detail.render(request=request, **_detail_ctx(db, job)),
+                    final=True,
+                )
+            return HtmlEvent("job-progress", progress.render(request=request, **_job_ctx(job)))
+
+        return html_sse_response(lambda: jobs.get_job(db, job_id), render)
 
     def fetch() -> dict:
         job = jobs.get_job(Database(db.path), job_id)
@@ -168,6 +179,13 @@ def jobs_detail(request: Request, job_id: int):
         return request.app.state.templates.TemplateResponse(
             request, "jobs/notfound.html", {"job_id": job_id}, status_code=200
         )
+    return request.app.state.templates.TemplateResponse(
+        request, "jobs/detail.html", _detail_ctx(db, job),
+    )
+
+
+def _detail_ctx(db: Database, job: jobs.JobRow) -> dict[str, Any]:
+    job_id = job.id
     failures = query_records(db, job_id=job_id, status="error", limit=100,
                              include_unapplied=True)
     ctx: dict[str, Any] = {**_job_ctx(job), "failures": failures, "params_json": json.dumps(
@@ -185,9 +203,12 @@ def jobs_detail(request: Request, job_id: int):
         target = job.params.get("target_job_id")
         ctx["undo_target"] = target
         ctx["target_job"] = jobs.get_job(db, target) if target else None
-    return request.app.state.templates.TemplateResponse(
-        request, "jobs/detail.html", ctx
-    )
+    if job.type in {"undo", "reset"}:
+        ctx["change_conflicts"] = [
+            {**item, "reason_key": f"jobs.detail.conflict_{item['reason']}"}
+            for item in events.job_change_conflicts(db, job_id)
+        ]
+    return ctx
 
 
 @router.post("/{job_id}/cancel", response_class=HTMLResponse, include_in_schema=False)
@@ -199,7 +220,7 @@ def jobs_cancel(request: Request, job_id: int):
 
 # ------------------------------------------------------------- 回滚
 
-_UNDOABLE_STATUS = ("done", "canceled")
+_UNDOABLE_STATUS = ("done", "canceled", "failed")
 
 
 def _undoable(db: Database, job: jobs.JobRow | None) -> bool:

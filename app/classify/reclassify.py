@@ -1,14 +1,9 @@
-"""重新分类：摘掉本系统管理的旧标签并重新执行分类管线。
-
-语义：摘掉"本系统管理的标签"（系统管理标签 ∩ asset 实际拥有）→ 写
-change_log（tag_remove）→ 清空 current_tag/current_markers 并更新 last_job_id
-→ 调用 classify_asset 重跑（source="manual"，绕过已完成过滤）。
-"""
+"""Reclassify using fresh analysis while holding the asset's existing lease."""
 from __future__ import annotations
 
-import json
-
-from app.classify.manual import _managed_tag_names, owned_tag_names
+from app.classify.inverse import reconcile_pending_inverse
+from app.classify.lease import LLM_MAX_RETRIES, claim, lease_seconds_for, release
+from app.classify.ownership import ALBUM, TAG, matching_resource, owned_memberships
 from app.classify.pipeline import PipelineConfig, PipelineResult, classify_asset
 from app.db.connection import Database
 
@@ -24,47 +19,26 @@ def reclassify_asset(
     prompt_version_id: int | None = None,
 ) -> PipelineResult:
     asset_id = str(asset_id)
-
-    with db.connect() as conn:
-        row = conn.execute(
-            "SELECT * FROM asset_state WHERE asset_id = ?", (asset_id,)
-        ).fetchone()
-    state = dict(row) if row else None
-
-    # ① 摘旧：本系统管理 ∩ 实际拥有
-    managed = _managed_tag_names(db, state)
-    to_remove = sorted(managed & owned_tag_names(client, asset_id))
-    if to_remove:
-        tag_ids = client.ensure_tags(to_remove)
-        for name in to_remove:
-            client.untag_assets(tag_ids[name], [asset_id])
-
-    # ② change_log + 清空 state（单事务）。manual_override 位不动。
-    with db.connect() as conn:
-        for name in to_remove:
-            conn.execute(
-                "INSERT INTO change_log (job_id, asset_id, action, direction, "
-                "payload) VALUES (:job_id, :aid, 'tag_remove', 'apply', :payload)",
-                {"job_id": job_id, "aid": asset_id,
-                 "payload": json.dumps({"tag_name": name})},
-            )
-        conn.execute(
-            "INSERT INTO asset_state (asset_id, current_tag, current_markers, "
-            "                        apply_attempts, last_job_id) "
-            "VALUES (:aid, NULL, '[]', 0, :job_id) "
-            "ON CONFLICT(asset_id) DO UPDATE SET "
-            "  current_tag = NULL, current_markers = '[]', "
-            "  apply_attempts = 0, "
-            "  last_job_id = :job_id, updated_at = datetime('now')",
-            {"aid": asset_id, "job_id": job_id},
+    ttl = lease_seconds_for(cfg.llm.timeout, LLM_MAX_RETRIES)
+    if not claim(db, asset_id, cfg.concurrency_owner, ttl):
+        return PipelineResult(asset_id, "", None, (), "error", False)
+    try:
+        reconcile_pending_inverse(db, client, asset_id)
+        owned_tags = owned_memberships(db, asset_id, TAG)
+        tags = (client.get_asset(asset_id).tags or []) if owned_tags else []
+        tag_ids = {match[1]: match[0] for change in owned_tags
+                   if (match := matching_resource(change, tags))}
+        owned_albums = owned_memberships(db, asset_id, ALBUM)
+        albums = client.list_asset_albums(asset_id) if owned_albums else []
+        album_ids = {match[1]: match[0] for change in owned_albums
+                     if (match := matching_resource(change, albums))}
+        return classify_asset(
+            db, client, llm, asset_id, cfg,
+            source="manual", dry_run=False, job_id=job_id,
+            prompt_version_id=prompt_version_id, override_manual=False,
+            allow_metadata_overwrite=True, force_reanalysis=True,
+            lease_held=True, replace_owned_tags=tag_ids,
+            replace_owned_albums=album_ids,
         )
-
-    # ③ 重跑：source="manual" 绕 _already_done；override_manual=False
-    # 走全量 apply（归档/相册照常写，§5.5 显式发起不受改判限制）。
-    # DB 里的 manual_override 位不动——只影响本次 apply 行为。
-    return classify_asset(
-        db, client, llm, asset_id, cfg,
-        source="manual", dry_run=False, job_id=job_id,
-        prompt_version_id=prompt_version_id, override_manual=False,
-        allow_metadata_overwrite=True,
-    )
+    finally:
+        release(db, asset_id, cfg.concurrency_owner)

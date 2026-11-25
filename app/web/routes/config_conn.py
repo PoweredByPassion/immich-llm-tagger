@@ -174,6 +174,11 @@ async def llm_save(request: Request):
         store.set_llm(conn)
         settings_store.set("thumb_preset", thumb_preset)
         settings_store.set("thumb_quality", thumb_quality)
+        if "privacy_settings" in form:
+            settings_store.set("allow_cloud_images", "allow_cloud_images" in form)
+            settings_store.set("retain_model_payloads", "retain_model_payloads" in form)
+            marker = str(form.get("sensitive_marker_tag_name", "")).strip() or "sensitive"
+            settings_store.set("sensitive_marker_tag_name", marker)
     except ValueError as exc:
         # 校验失败：不持久化，回显表单 + 错误横幅。
         return _templates(request).TemplateResponse(

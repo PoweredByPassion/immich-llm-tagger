@@ -15,7 +15,7 @@ from app.classify.reset_ops import (
 )
 from app.clients.immich import ImmichClient, ImmichError
 from app.store.connections import ConnectionStore
-from app.store.jobs import create_job, has_active_job
+from app.store.jobs import JobsActive, enqueue_reset, has_active_job
 from app.web.i18n import lang_from_cookie, t
 from app.web.routes.config_conn import _templates
 
@@ -71,9 +71,10 @@ async def danger_reset(request: Request):
     dims = {d for d in form.getlist("dimensions") if d in _RESET_DIMENSIONS}
     if not dims:
         return _error_422(request, t("danger.no_dimension", lang))
-    if has_active_job(db):
+    try:
+        job_id = enqueue_reset(db, {"dimensions": sorted(dims)})
+    except JobsActive:
         return _error_422(request, t("danger.job_active", lang))
-    job_id = create_job(db, "reset", params={"dimensions": sorted(dims)})
     return RedirectResponse(f"/jobs/{job_id}", status_code=303)
 
 

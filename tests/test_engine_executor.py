@@ -175,7 +175,7 @@ def test_single_job_ok_done_and_events(db: Database, monkeypatch) -> None:
     assert "asset_ingested" in types
 
 
-def test_single_job_error_result_counts_failed_but_done(db: Database,
+def test_single_job_error_result_counts_failed(db: Database,
                                                         monkeypatch) -> None:
     """失败模式 2：classify 返回 error → failed+1，job 仍 done。"""
     rec = Recorder(results=[err("a1")])
@@ -186,7 +186,7 @@ def test_single_job_error_result_counts_failed_but_done(db: Database,
     run_single_job(db, None, None, job, cfg=make_cfg())
 
     row = get_job(db, job_id)
-    assert row.status == "done" and row.failed == 1 and row.done == 0
+    assert row.status == "failed" and row.failed == 1 and row.done == 0
     assert "job_error" in event_types(db)
 
 
@@ -395,7 +395,7 @@ def test_classify_item_lease_conflict_retries_not_failed(db: Database,
                 "INSERT INTO asset_records (asset_id, job_id, source, status, "
                 "dry_run, applied_at) VALUES (?, ?, 'poll', 'ok', 0, "
                 "datetime('now'))", (asset_id, parent))
-        return err(asset_id)               # status="error"
+        return replace(err(asset_id), status="busy")
 
     monkeypatch.setattr(executor_module, "classify_asset", _side_effect_recorder)
     monkeypatch.setattr(executor_module.time, "sleep", lambda *_: None)
@@ -440,7 +440,7 @@ def test_classify_item_genuine_error_counts_failed(db: Database,
     p = jobs.get_job(db, parent)
     assert p.failed == 1 and p.done == 0
     assert "job_error" in event_types(db)
-    assert jobs.get_job(db, child.id).status == "done"
+    assert jobs.get_job(db, child.id).status == "failed"
 
 
 def test_classify_item_record_failure_does_not_double_count(
@@ -460,7 +460,7 @@ def test_classify_item_record_failure_does_not_double_count(
 
     p = jobs.get_job(db, parent)
     assert p.done + p.failed == 1        # 只计一次
-    assert jobs.get_job(db, child.id).status == "failed"
+    assert jobs.get_job(db, child.id).status == "done"
 
 
 def test_classify_item_malformed_params_fails_without_escaping(db: Database,
@@ -707,7 +707,7 @@ def test_resumed_scan_only_processes_remaining(db: Database,
         conn.execute("UPDATE jobs SET status='running', done=2, total=4 "
                      "WHERE id=?", (job_id,))
     # —— 模拟进程重启：恢复入队 → 重新 claim ——
-    assert jobs.requeue_orphan_running_jobs(db) == [job_id]
+    assert jobs.recover_jobs(db)[0] == [job_id]
     job = jobs.claim_next(db)
     assert job is not None and job.id == job_id
     assert job.done == 2  # 进度跨重启保留
@@ -741,7 +741,7 @@ def test_resumed_scan_keeps_total_when_fewer_candidates(db: Database,
     with db.connect() as conn:
         conn.execute("UPDATE jobs SET status='running', done=685, total=722 "
                      "WHERE id=?", (job_id,))
-    assert jobs.requeue_orphan_running_jobs(db) == [job_id]
+    assert jobs.recover_jobs(db)[0] == [job_id]
     job = jobs.claim_next(db)
     assert job.done == 685
 
@@ -807,7 +807,7 @@ def test_scan_cancel_stops_splitting_new_assets(db: Database,
 
     # 协调器：清掉排队子任务 → 父收尾
     finish_parent(db, job_id)
-    assert get_job(db, job_id).status == "done"
+    assert get_job(db, job_id).status == "canceled"
     assert jobs.get_job(db, children[0].id).status == "canceled"
 
 
@@ -867,6 +867,54 @@ def test_build_pipeline_config_reads_prompt_version(db: Database) -> None:
     assert cfg.prompt_template == "custom {{TAG_LIST}}"
 
 
+def test_queued_job_preserves_original_prompt_through_settings_change(db: Database) -> None:
+    from app.store.crud import create_prompt_version
+
+    first = create_prompt_version(db, body="first {{TAG_LIST}}")
+    second = create_prompt_version(db, body="second {{TAG_LIST}}")
+    SettingsStore(db).set_active_prompt_version(first)
+    job_id = jobs.create_job(db, "single", {"asset_id": "asset-1"})
+    SettingsStore(db).set_active_prompt_version(second)
+
+    cfg = build_pipeline_config(db, jobs.get_job(db, job_id))
+
+    assert (cfg.prompt_version_id, cfg.prompt_template) == (first, "first {{TAG_LIST}}")
+
+
+def test_scan_resumes_after_cursor_without_requeueing_discovered_assets(db: Database) -> None:
+    from app.clients.immich import ImmichScanIncomplete
+    from app.clients._immich_gen.models.asset_type_enum import AssetTypeEnum
+
+    def asset(aid):
+        return SimpleNamespace(id=aid, type_=AssetTypeEnum.IMAGE, original_path="/photos")
+
+    class PagedClient:
+        def ensure_tags(self, names):
+            return {name: name for name in names}
+
+        def iter_asset_pages(self, dto, *, page, cursor):
+            if cursor is None:
+                yield [asset("first")], "opaque-token"
+                raise ImmichScanIncomplete(2)
+            assert cursor == "opaque-token"
+            yield [asset("first"), asset("second")], None
+
+    scan, _ = jobs.enqueue_scan(db, {"source": "poll"})
+    job = jobs.claim_next(db)
+    run_scan_job(db, PagedClient(), None, job, make_cfg)
+    assert jobs.get_job(db, scan).scan_cursor == "opaque-token"
+    assert jobs.claim_next(db) is None
+    with db.connect() as conn:
+        conn.execute("UPDATE jobs SET available_at=NULL WHERE id=?", (scan,))
+
+    run_scan_job(db, PagedClient(), None, jobs.claim_next(db), make_cfg)
+
+    parent = jobs.get_job(db, scan)
+    assert parent.discovery_complete and parent.total == 2
+    assert jobs.claim_next(db).params["asset_id"] == "first"
+    assert jobs.claim_next(db).params["asset_id"] == "second"
+
+
 def test_build_pipeline_config_empty_tags_allowed(db: Database) -> None:
     """tags 为空 → tag_list 空（可接受的降级：LLM 拒答/fallback）。"""
     cfg = build_pipeline_config(db)
@@ -902,7 +950,7 @@ def test_run_job_dispatch_scan_builds_cfg_with_db(db, monkeypatch):
 
     seen_cfg = {}
 
-    def fake_build(d):
+    def fake_build(d, job):
         seen_cfg["db_is_same"] = d is db
         return make_cfg()
 
@@ -935,7 +983,7 @@ def test_run_job_dispatch_single_builds_cfg(db, monkeypatch):
     from app.engine.executor import run_job
 
     monkeypatch.setattr(
-        executor_module, "build_pipeline_config", lambda d: make_cfg(),
+        executor_module, "build_pipeline_config", lambda d, job: make_cfg(),
     )
     monkeypatch.setattr(
         executor_module, "classify_asset",
@@ -996,6 +1044,9 @@ def test_undo_dispatch_executes_and_finishes(db, monkeypatch):
     calls: list[tuple[str, list[str]]] = []
 
     class FakeClient:
+        def get_asset(self, asset_id):
+            return SimpleNamespace(tags=[SimpleNamespace(name="cat", id="tag-1")])
+
         def list_tags(self):
             from types import SimpleNamespace
             return [SimpleNamespace(name="cat", id="tag-1"),
@@ -1032,8 +1083,8 @@ def test_undo_dispatch_404_skip_counts_as_progress_not_failed_done(db, monkeypat
     jid = jobs.create_job(db, "undo", {"target_job_id": 5})
 
     class FakeClient:
-        def list_tags(self):
-            return []  # "gone" 不存在 → 404 路径
+        def get_asset(self, asset_id):
+            return SimpleNamespace(tags=[])
 
         def untag_assets(self, tag_id, asset_ids):  # pragma: no cover
             raise AssertionError("should not be called")
@@ -1056,7 +1107,7 @@ def test_undo_dispatch_unexpected_exception_fails_job(db, monkeypatch):
     jid = jobs.create_job(db, "undo", {"target_job_id": 5})
 
     class FakeClient:
-        def list_tags(self):
+        def get_asset(self, asset_id):
             raise RuntimeError("boom")
 
     run_job(db, FakeClient(), None, jobs.get_job(db, jid))
@@ -1264,7 +1315,7 @@ def test_backfill_cancel_between_batches(db, monkeypatch):
     run_job(db, FakeClient(), None, jobs.get_job(db, jid))
 
     row = jobs.get_job(db, jid)
-    assert row.status == "done"
+    assert row.status == "canceled"
     assert tagged == [["a-1"]]
     assert row.done == 1 and row.total == 3
 
@@ -1313,7 +1364,7 @@ def test_reclassify_dispatch_error_counts_failed(db, monkeypatch):
     jid = jobs.create_job(db, "reclassify", {"asset_ids": ["a-1"]})
     run_job(db, None, None, jobs.get_job(db, jid))
     row = jobs.get_job(db, jid)
-    assert row.status == "done" and row.failed == 1 and row.done == 0
+    assert row.status == "failed" and row.failed == 1 and row.done == 0
 
 
 def test_reclassify_dispatch_cancel_between_assets(db, monkeypatch):
@@ -1333,7 +1384,7 @@ def test_reclassify_dispatch_cancel_between_assets(db, monkeypatch):
     monkeypatch.setattr(executor_module, "reclassify_asset", fake_reclassify)
     run_job(db, None, None, jobs.get_job(db, jid))
     row = jobs.get_job(db, jid)
-    assert row.status == "done"
+    assert row.status == "canceled"
     assert calls == ["a-1"]
 
 
@@ -1359,7 +1410,7 @@ def test_reset_dispatch_runs_steps_and_finishes(db, monkeypatch):
     seen: dict = {}
     monkeypatch.setattr(
         executor_module, "run_reset_steps",
-        lambda db, client, *, job_id, is_canceled, dimensions=None: (
+        lambda db, client, *, job_id, is_canceled, dimensions=None, on_progress=None: (
             seen.update(job_id=job_id, cancel_fn=is_canceled,
                         dimensions=dimensions) or steps))
     jid = jobs.create_job(db, "reset", {})

@@ -1,0 +1,47 @@
+    <!-- KPI 4 卡矩阵 -->
+    <section class="grid grid-cols-2 gap-4 md:grid-cols-4">
+      <div class="p-5 rounded bg-[#13151c] border border-[#20232d]">
+        <p class="text-xs font-medium text-zinc-400">{{ tr("common.status") }}</p>
+        <p class="mt-2 text-sm font-medium">
+          <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded text-xs font-mono font-medium {% if job.status == 'failed' %}border-rose-500/30 bg-rose-500/10 text-rose-300{% elif job.status in ('done', 'running') %}border-emerald-500/30 bg-emerald-500/10 text-emerald-300{% else %}border-[#20232d] bg-[#181b24] text-zinc-300{% endif %} border">
+            {{ job.status }}
+          </span>
+        </p>
+      </div>
+      <div class="p-5 rounded bg-[#13151c] border border-[#20232d]">
+        <p class="text-xs font-medium text-zinc-400">{{ tr("jobs.th.progress") }}</p>
+        <p class="num mt-1 text-2xl font-semibold tabular-nums text-zinc-100 font-mono" data-job-progress>{{ job.done }}/{{ job.total }}</p>
+      </div>
+      <div class="p-5 rounded bg-[#13151c] border border-[#20232d]">
+        <p class="text-xs font-medium text-zinc-400">{{ tr("jobs.th.failed") }}</p>
+        <p class="num mt-1 text-2xl font-semibold tabular-nums font-mono {% if job.failed %}text-rose-400 font-medium{% else %}text-zinc-100{% endif %}">{{ job.failed }}</p>
+      </div>
+      <div class="p-5 rounded bg-[#13151c] border border-[#20232d]">
+        <p class="text-xs font-medium text-zinc-400">{{ tr("jobs.th.duration") }}</p>
+        <p class="num mt-1 text-2xl font-semibold tabular-nums text-zinc-100 font-mono">{{ duration }}</p>
+      </div>
+    </section>
+
+    <!-- 进度条面板 -->
+    <section class="p-5 rounded bg-[#13151c] border border-[#20232d] space-y-3">
+      <div class="h-2.5 w-full overflow-hidden rounded bg-[#202430]">
+        <div class="h-full bg-[#5e6ad2] rounded transition-all duration-300" style="width: {{ progress_pct }}%"></div>
+      </div>
+      <div class="grid grid-cols-2 sm:grid-cols-3 gap-4 text-sm pt-1">
+        <div>
+          <span class="text-xs text-zinc-400">{{ tr("jobs.detail.rate") }}</span>
+          <span class="num font-mono tabular-nums text-zinc-200 ml-1">{{ rate }}</span>
+        </div>
+        <div>
+          <span class="text-xs text-zinc-400">{{ tr("jobs.detail.eta") }}</span>
+          <span class="num font-mono tabular-nums text-zinc-200 ml-1">{{ eta }}</span>
+        </div>
+        {% if skipped > 0 %}
+        <div class="col-span-2 sm:col-span-1">
+          <span class="text-xs text-zinc-400">{{ tr("jobs.detail.skipped") }}</span>
+          <span class="num font-mono tabular-nums text-zinc-200 ml-1">{{ skipped }}</span>
+          <p class="mt-1 text-xs text-amber-300/80">{{ tr("jobs.detail.skip_note") }}</p>
+        </div>
+        {% endif %}
+      </div>
+    </section>

@@ -81,7 +81,7 @@ class FakeClient:
                 rating=self.user_rating,          # ← 新增
                 description=self.user_description,  # ← 新增
             ),
-            tags=[],
+            tags=[SimpleNamespace(name="queue")],
             local_date_time=None,
             visibility="timeline",
         )
@@ -240,7 +240,7 @@ def test_normal_path_result_matches_llm_response(db: Database) -> None:
     )
     assert result == PipelineResult(
         asset_id="asset-1", tag="cat", confidence=0.9, markers=(),
-        status="ok", dry_run=False,
+        status="ok", dry_run=False, apply_status="applied",
     )
 
 
@@ -275,6 +275,9 @@ def test_normal_path_writes_full_record_and_applies(db: Database) -> None:
         "description": None,
         "created_at": r["created_at"],
         "applied_at": r["applied_at"],
+        "apply_status": "applied",
+        "apply_error": None,
+        "analysis_record_id": None,
     }
     assert r["llm_request"] is not None and '"messages"' in r["llm_request"]
     assert r["duration_ms"] is not None and r["duration_ms"] >= 0
@@ -315,7 +318,7 @@ def test_no_lease_means_no_processing(db: Database) -> None:
     client = FakeClient()
     llm = make_llm_ok()
     result = classify_asset(db, client, llm, "asset-1", make_cfg(), source="manual")
-    assert result.status == "error"
+    assert result.status == "busy"
     assert result.tag == ""
     assert client.get_asset_calls == 0
     assert client.fetch_thumb_calls == []
@@ -484,13 +487,40 @@ def test_refusal_applies_configured_marker_tag(db: Database) -> None:
 
 
 def test_unparseable_output_applies_configured_marker_tag(db: Database) -> None:
-    """不合契约的输出（status=refused）同样打上拒答 marker，与 UI 的 refused 对齐。"""
+    """Malformed output is distinct from refusal and still gets a review tag."""
     client = FakeClient()
     llm = FakeLLM(["The image shows a cat."])
     cfg = make_cfg(marker_rules=[("识别失败", {"on_refusal": True})])
     result = classify_asset(db, client, llm, "asset-1", cfg, source="poll")
-    assert result.status == "refused"
+    assert result.status == "error"
     assert "识别失败" in client.tagged_names
+
+
+def test_unapproved_remote_model_cannot_receive_image_even_in_sandbox(db: Database) -> None:
+    from dataclasses import replace
+
+    cfg = make_cfg(allow_cloud_images=False)
+    cfg = replace(cfg, llm=replace(cfg.llm, base_url="https://example.com"))
+    client, llm = FakeClient(), make_llm_ok()
+
+    result = classify_asset(db, client, llm, "asset-1", cfg, source="manual", dry_run=True)
+
+    assert result.failed and "remote model is disabled" in result.apply_error
+    assert not llm.calls and not client.write_calls
+
+
+def test_sensitive_outputs_never_write_description_and_use_configured_marker(db: Database) -> None:
+    client = FakeClient()
+    llm = FakeLLM(['{"tag":"cat","confidence":0.95,"sensitive":true,"description":"confidential"}'])
+    cfg = make_cfg(sensitive_marker_tag_name="敏感隐私", retain_model_payloads=False)
+
+    result = classify_asset(db, client, llm, "asset-1", cfg, source="poll")
+
+    assert result.apply_status == "applied"
+    assert "敏感隐私" in client.tagged_names
+    assert not client.set_props_calls
+    record = _records(db)[0]
+    assert record["raw_response"] is None and record["llm_request"] is None
 
 
 # ------------------------------------------------------- 失败模式 6
@@ -1120,7 +1150,8 @@ def test_skip_marker_payload_records_which_fields_were_skipped(db: Database) -> 
             "SELECT payload FROM change_log WHERE asset_id='asset-1' "
             "AND action='tag_add' ORDER BY id DESC LIMIT 1").fetchone()
     assert json.loads(row["payload"]) == {
-        "tag_name": "保留人工信息", "skipped": ["rating"]}
+        "tag_name": "保留人工信息", "skipped": ["rating"],
+        "tag_id": "tag-id-保留人工信息", "tag_kind": "marker"}
 
 
 def test_pipeline_does_not_mark_when_value_is_ours(db: Database) -> None:
@@ -1210,6 +1241,58 @@ def test_give_up_does_not_reset_applied_at(db: Database) -> None:
 # ------------------------------------- Task 11: 重试复用分析结果（§7.3 层 1）
 
 
+def test_retry_records_its_own_job_and_does_not_mark_original_applied(db: Database) -> None:
+    client = FakeClient(fail_on="tag_assets")
+    llm = FakeLLM([RATING_JSON])
+    first = classify_asset(db, client, llm, "asset-1", make_cfg(), source="poll", job_id=1)
+    client.fail_on = None
+    second = classify_asset(db, client, llm, "asset-1", make_cfg(), source="poll", job_id=2)
+
+    assert first.apply_status == "pending"
+    assert second.apply_status == "applied"
+    assert len(llm.calls) == 1
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT job_id, applied_at IS NOT NULL FROM asset_records ORDER BY id"
+        ).fetchall()
+    assert [tuple(row) for row in rows] == [(1, 0), (2, 1)]
+
+
+def test_recovers_when_queue_removal_succeeds_but_local_confirmation_fails(db: Database) -> None:
+    class QueueClient(FakeClient):
+        queued = True
+
+        def get_asset(self, asset_id):
+            asset = super().get_asset(asset_id)
+            asset.tags = [SimpleNamespace(name="queue")] if self.queued else []
+            return asset
+
+        def untag_assets(self, tag_id, asset_ids):
+            assert self.queued
+            super().untag_assets(tag_id, asset_ids)
+            self.queued = False
+
+    client = QueueClient()
+    llm = FakeLLM([LLM_JSON])
+    with db.connect() as conn:
+        conn.execute("""
+            CREATE TRIGGER lost_confirmation BEFORE INSERT ON change_log
+            WHEN NEW.action = 'queue_remove'
+            BEGIN SELECT RAISE(ABORT, 'simulated disk failure'); END
+        """)
+    classify_asset(db, client, llm, "asset-1", make_cfg(), source="poll", job_id=1)
+    assert not client.queued
+    with db.connect() as conn:
+        conn.execute("DROP TRIGGER lost_confirmation")
+
+    result = classify_asset(db, client, llm, "asset-1", make_cfg(), source="poll", job_id=2)
+
+    assert result.apply_status == "applied"
+    assert len(llm.calls) == 1
+    with db.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM change_log WHERE action='queue_remove'").fetchone()[0] == 1
+
+
 def test_retry_reuses_stored_analysis_without_llm(db: Database) -> None:
     """已有 status='ok' 且 applied_at IS NULL 的记录 → 不再调 LLM（§7.3 层 1）。"""
     with db.connect() as conn:
@@ -1226,9 +1309,10 @@ def test_retry_reuses_stored_analysis_without_llm(db: Database) -> None:
     assert client.set_props_calls == [{"rating": 4, "description": "一只猫"}]
     with db.connect() as conn:
         rows = conn.execute(
-            "SELECT applied_at FROM asset_records WHERE asset_id='asset-1'"
+            "SELECT applied_at FROM asset_records WHERE asset_id='asset-1' ORDER BY id DESC"
         ).fetchall()
-    assert len(rows) == 1 and rows[0]["applied_at"] is not None   # §6.5：不新增行，只盖章
+    assert len(rows) == 2 and rows[0]["applied_at"] is not None
+    assert rows[1]["applied_at"] is None
 
 
 def test_successful_apply_clears_apply_attempts(db: Database) -> None:
@@ -1259,7 +1343,7 @@ def test_successful_apply_clears_apply_attempts(db: Database) -> None:
         ).fetchone()["apply_attempts"] == 0
         # 成功盖章照旧：修的是计数器，不是 applied_at
         assert conn.execute(
-            "SELECT applied_at FROM asset_records WHERE asset_id='asset-1'"
+            "SELECT applied_at FROM asset_records WHERE asset_id='asset-1' ORDER BY id DESC"
         ).fetchone()["applied_at"] is not None
 
 

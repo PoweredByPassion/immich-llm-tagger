@@ -11,14 +11,17 @@ marker 标签（两者都只认本地 tags 表里登记过的名字，Immich 上
 from __future__ import annotations
 
 import json
-import sqlite3
+from contextlib import contextmanager
+from dataclasses import dataclass
+from threading import Lock
 
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
+from starlette.concurrency import run_in_threadpool
 
 
 from app.classify.manual import apply_override, clear_override, mark_reviewed
-from app.store.jobs import create_job, get_job
+from app.store.jobs import ResetInProgress, asset_mutation, create_job, get_job
 from app.clients.immich import ImmichClient, ImmichError
 from app.store.assets import (
     count_records,
@@ -28,7 +31,7 @@ from app.store.assets import (
     query_records,
     records_for_asset,
 )
-from app.store.connections import ConnectionStore
+from app.store.connections import ConnectionStore, ImmichConn
 from app.store.settings import SettingsStore
 from app.store.tags import load_tags
 from app.web.i18n import lang_from_cookie, t
@@ -37,8 +40,49 @@ router = APIRouter(prefix="/assets")
 
 PAGE_SIZE = 50
 
-# 测试 hook：记录构造出的客户端实例（生产代码不用它）
-_fake_instances: list = []
+@dataclass
+class _AssetClient:
+    config: ImmichConn
+    client: ImmichClient
+    borrowers: int = 0
+
+
+class AssetClients:
+    """Shared Immich connections with safe replacement after a settings change."""
+
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._current: _AssetClient | None = None
+
+    @contextmanager
+    def use(self, config: ImmichConn):
+        with self._lock:
+            entry = self._current
+            if entry is None or config != entry.config:
+                client = ImmichClient(
+                    base_url=config.url, api_key=config.api_key,
+                    verify_ssl=config.verify_ssl, timeout=30.0,
+                )
+                client.open()
+                self._retire()
+                entry = self._current = _AssetClient(config, client)
+            entry.borrowers += 1
+        try:
+            yield entry.client
+        finally:
+            with self._lock:
+                entry.borrowers -= 1
+                if entry is not self._current and entry.borrowers == 0:
+                    entry.client.close()
+
+    def _retire(self) -> None:
+        entry, self._current = self._current, None
+        if entry is not None and entry.borrowers == 0:
+            entry.client.close()
+
+    def close(self) -> None:
+        with self._lock:
+            self._retire()
 
 
 def _db(request: Request):
@@ -47,6 +91,10 @@ def _db(request: Request):
 
 def _templates(request: Request):
     return request.app.state.templates
+
+
+def _clients(request: Request) -> AssetClients:
+    return request.app.state.asset_clients
 
 
 def _int_or_none(raw: str | None) -> int | None:
@@ -172,21 +220,16 @@ def asset_detail(request: Request, asset_id: str):
 def _proxy_asset_image(request: Request, asset_id: str, size: str) -> Response:
     """代理 Immich 图片字节（原始直出）。失败一律回落 404，由前端 onerror
     显示占位图标，绝不 500、绝不冒泡。"""
-    conn = ConnectionStore(_db(request)).get_immich()
-    if not conn.url:
+    config = ConnectionStore(_db(request)).get_immich()
+    if not config.url:
         return Response(status_code=404)
     try:
-        client = ImmichClient(
-            base_url=conn.url,
-            api_key=conn.api_key,
-            verify_ssl=conn.verify_ssl,
-            timeout=30.0,
-        )
-        _fake_instances.append(client)
-        raw = client.fetch_thumbnail_bytes(asset_id, size)
+        with _clients(request).use(config) as client:
+            raw = client.fetch_thumbnail_bytes(asset_id, size)
     except ImmichError:
         return Response(status_code=404)
-    return Response(content=raw, media_type="image/jpeg")
+    return Response(content=raw, media_type="image/jpeg",
+                    headers={"Cache-Control": "private, no-store"})
 
 
 @router.get("/{asset_id}/thumb")
@@ -213,12 +256,23 @@ def _review_result(request: Request, asset_id: str) -> HTMLResponse:
     )
 
 
+def _reset_busy(request: Request, template: str) -> HTMLResponse:
+    message = t("assets.reset_in_progress", lang_from_cookie(request.cookies))
+    return _templates(request).TemplateResponse(
+        request, template, {"ok": False, "message": message},
+    )
+
+
 @router.post("/{asset_id}/review", response_class=HTMLResponse)
 def asset_review(request: Request, asset_id: str):
     """标记/取消已复核（toggle）。无 Immich 变更，不写 change_log。"""
     db = _db(request)
-    state = get_state(db, asset_id)
-    mark_reviewed(db, asset_id, reviewed=not (state or {}).get("reviewed"))
+    try:
+        with asset_mutation(db):
+            state = get_state(db, asset_id)
+            mark_reviewed(db, asset_id, reviewed=not (state or {}).get("reviewed"))
+    except ResetInProgress:
+        return _reset_busy(request, "assets/_review_result.html")
     return _review_result(request, asset_id)
 
 
@@ -236,23 +290,22 @@ async def asset_override(request: Request, asset_id: str):
             "assets/_override_result.html",
             {"ok": False, "message": t("assets.override.select_tag", lang), "asset_id": asset_id},
         )
-    conn = ConnectionStore(db).get_immich()
-    if not conn.url:
+    config = ConnectionStore(db).get_immich()
+    if not config.url:
         return _templates(request).TemplateResponse(
             request,
             "assets/_override_result.html",
             {"ok": False, "message": t("common.immich_not_configured", lang),
              "asset_id": asset_id},
         )
+    def apply() -> None:
+        with _clients(request).use(config) as client:
+            apply_override(db, client, asset_id, new_tag, marker_tags=markers)
+
     try:
-        client = ImmichClient(
-            base_url=conn.url,
-            api_key=conn.api_key,
-            verify_ssl=conn.verify_ssl,
-            timeout=30.0,
-        )
-        _fake_instances.append(client)
-        apply_override(db, client, asset_id, new_tag, marker_tags=markers)
+        await run_in_threadpool(apply)
+    except ResetInProgress:
+        return _reset_busy(request, "assets/_override_result.html")
     except ImmichError as exc:
         return _templates(request).TemplateResponse(
             request,
@@ -273,7 +326,12 @@ async def asset_override(request: Request, asset_id: str):
 @router.post("/{asset_id}/override/clear", response_class=HTMLResponse)
 def asset_override_clear(request: Request, asset_id: str):
     """取消改判：仅恢复自动处理资格，不回滚标签。"""
-    clear_override(_db(request), asset_id)
+    db = _db(request)
+    try:
+        with asset_mutation(db):
+            clear_override(db, asset_id)
+    except ResetInProgress:
+        return _reset_busy(request, "assets/_review_result.html")
     return _review_result(request, asset_id)
 
 
@@ -287,6 +345,14 @@ def asset_reclassify(request: Request, asset_id: str):
 
 @router.post("/{asset_id}/sync", response_class=HTMLResponse)
 def asset_sync(request: Request, asset_id: str):
+    try:
+        with asset_mutation(_db(request)):
+            return _sync_asset(request, asset_id)
+    except ResetInProgress:
+        return _reset_busy(request, "assets/_sync_result.html")
+
+
+def _sync_asset(request: Request, asset_id: str):
     lang = lang_from_cookie(request.cookies)
     db = _db(request)
     state = get_state(db, asset_id)
@@ -303,16 +369,9 @@ def asset_sync(request: Request, asset_id: str):
             "assets/_sync_result.html",
             {"ok": False, "message": t("common.immich_not_configured", lang)},
         )
-    # 显式 timeout（CLAUDE.md 规矩）；连接配置暂无超时字段，固定 30s
     try:
-        client = ImmichClient(
-            base_url=conn.url,
-            api_key=conn.api_key,
-            verify_ssl=conn.verify_ssl,
-            timeout=30.0,
-        )
-        _fake_instances.append(client)
-        asset = client.get_asset(asset_id)
+        with _clients(request).use(conn) as client:
+            asset = client.get_asset(asset_id)
     except ImmichError as exc:
         return _templates(request).TemplateResponse(
             request,

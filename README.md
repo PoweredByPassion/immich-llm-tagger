@@ -27,7 +27,7 @@ When backing up photos from smartphones (e.g. via iCloud sync, Google Photos, or
 2. **Organize into Albums**: File invoices and paper scans into `Documents`, and identity certificates into `ID Documents`.
 3. **Protect privacy**: Mark identity documents, passwords, and sensitive cards with `sensitive` tags.
 4. **Preserve real photos**: Keep genuine life photography untouched on the main timeline.
-5. **Full Reversibility**: Every single action is tracked in audit change logs and can be rolled back in one click.
+5. **Audited Changes and Rollback**: Review confirmed changes in a job and roll back changes that still match the current state in Immich.
 
 ---
 
@@ -40,7 +40,7 @@ When backing up photos from smartphones (e.g. via iCloud sync, Google Photos, or
   - **Real-time Webhook**: Triggered immediately when photos are uploaded or tagged in Immich.
   - **Polling Fallback**: Configurable periodic scanning to ensure zero missed assets.
 - 🔒 **Concurrency & Lease Lock**: Atomic lease claims in SQLite ensure no duplicate processing even with concurrent workers.
-- ↩️ **One-Click Undo & Reversible Operations**: Full audit logging (`change_log`) allows rolling back any job at any time.
+- ↩️ **Task Rollback**: Revert supported changes from a retained job. Conflicting changes are listed in its details.
 - ⭐ **Ratings & Descriptions (switched per tag)**: Let the vision model also fill in Immich's own star rating and description. **Each tag decides whether they are written** (the same model as archive / album / skip), the rating means "how good the photo looks" rather than importance or keepsake value, and a per-field guard never overwrites something you wrote yourself.
 - 🛡️ **Non-destructive & Scoped Safety**: The Danger Zone resets only the dimensions you check (tags / classification / rating / description) and only touches assets this system has handled—tag objects and your manually curated tags on other photos remain completely untouched.
 - 🎨 **Linear Dark Management UI**: Built with FastAPI, Tailwind CSS, Alpine.js, and HTMX. Features real-time SSE progress updates, asset cards, and visual rule editors.
@@ -73,18 +73,27 @@ LLM_BASE_URL=http://host.docker.internal:7863  # Or your LLM provider URL
 LLM_API_KEY=your_llm_api_key
 LLM_MODEL=deepseek-vl                         # Your vision model name
 DATA_DIR=/data
-AUTH_PASSWORD=                                # Set to enable password auth (public deployments); empty = disabled
+AUTH_PASSWORD=                                # May be empty for local-only use
+TAGGER_BIND_ADDRESS=127.0.0.1                 # To enable remote access, set a host address and password
 ```
 
 > **Note for Local LLM Services**: If your LLM service runs directly on your Docker host machine (e.g. port 7863 or 11434 for Ollama), keep `host.docker.internal` so the container can reach the host network.
+
+If you use a remote vision model, enable image uploads in the model connection settings. This also applies after upgrading an existing installation.
 
 ### Step 2: Start Service
 
 Pulls the prebuilt image `ghcr.io/poweredbypassion/immich-llm-tagger:latest` and starts the container:
 
+The container runs as UID and GID `10001` and uses the existing `./data` directory. On Linux, set ownership when preparing a new directory or upgrading from a version that ran as root.
+
 ```bash
+mkdir -p ./data
+sudo chown -R 10001:10001 ./data
 docker compose up -d
 ```
+
+If Immich runs in a separate container, or Immich or your browser runs on another machine, set `TAGGER_BIND_ADDRESS` to a reachable host address and set a strong `AUTH_PASSWORD` before starting. Set a password when exposing the management UI through a reverse proxy as well.
 
 Open your browser and navigate to: **`http://localhost:8080`**.
 
@@ -204,17 +213,19 @@ The same panel contains:
 
 ### Danger Zone: per-dimension reset
 
+Undoable jobs are kept for 365 days by default. Recognition history and diagnostic logs are kept for 90 days by default. Adjust the undo retention period in the polling settings.
+
 The Danger Zone resets **four independent dimensions** — tags, classification (unarchive + remove from albums), rating, description. Each checkbox shows the *estimated* number of affected assets, computed from the local database. **Only the checked dimensions are touched**; an unchecked dimension is left exactly as it is, local mirror columns included.
 
-For rating/description the reset has a safety valve: a field is restored to the value that existed before this system first wrote it — and only if Immich's *current* value still equals what the system last wrote. If you edited it yourself since, the reset leaves it alone (an originally empty description is restored as `""`). Reset still requires typing `RESET` twice and is refused while any job is active.
+For rating and description, reset restores the value before the current series of Tagger writes when the field in Immich still matches the latest write. The job lists conflicts it skips. Once active jobs and pending writes have finished, type `RESET` twice to start.
 
 ---
 
 ## 🛠️ Advanced Operations
 
 - **Single Asset Processing & Sandbox**: Test LLM prompt results on any single `assetId` in real-time without writing changes to Immich.
-- **Reclassify (重新分类)**: If you update your prompt or category rules, easily trigger a reclassify on specific assets. The system strips previous managed tags and re-evaluates the asset — this is also the one path that refreshes a rating/description it wrote itself.
-- **Task Rollback (Undo)**: In the **Jobs** tab, click **Undo** on any finished job to reverse the tag additions, album attachments, and visibility changes made during that run. (Undoing a Danger Zone reset restores tags on system-managed assets; visibility stays unarchived.)
+- **Reclassify (重新分类)**: Process selected assets with the latest model and rules. The system replaces its previous tags and album memberships after it receives a valid new result. It can also refresh ratings and descriptions it previously wrote.
+- **Task Rollback (Undo)**: Open a retained job and choose **Undo** to reverse supported changes, including ratings, descriptions, visibility, tags, and album memberships. If Immich has changed since the job, its details list the skipped changes. For a Danger Zone reset, Undo restores the recorded tag and album memberships.
 - **Danger Zone Reset (安全重置)**: Pick one or more dimensions (tags / classification / rating / description) and reset only those — see **Rating & Description** above for the rating/description safety valve. Tag objects are never deleted and user-curated tags on other photos are never touched.
 
 ---

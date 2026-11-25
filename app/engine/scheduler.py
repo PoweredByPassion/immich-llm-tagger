@@ -9,12 +9,15 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
 
 from app.store import events, jobs
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_TICK_STEP = 5.0
 
@@ -43,16 +46,14 @@ def decide_tick(
         return False
     if last_run is not None and now - last_run < interval:
         return False
-    if has_active:
-        return False
-    return True
+    return not has_active
 
 
 class PollScheduler:
     def __init__(
         self,
         db_path: Path | str,
-        enqueue_scan: Callable[[], None],
+        enqueue_scan: Callable[[], bool | None],
         *,
         interval_getter: Callable[[], float],
         enabled_getter: Callable[[], bool],
@@ -94,23 +95,18 @@ class PollScheduler:
             has_active=has_active,
         )
         if not due:
-            if enabled and time_due and has_active:
-                # 节流：同一阻塞状态最多每 SKIP_ACTIVE_LOG_INTERVAL 记一条
-                if (self._last_skip_log is None
-                        or now - self._last_skip_log >= SKIP_ACTIVE_LOG_INTERVAL):
-                    self._last_skip_log = now
-                    events.log_event(
-                        db, "poll", "scan_skip_active",
-                        {"reason": "active scan exists"},
-                    )
+            should_log_skip = self._last_skip_log is None or now - self._last_skip_log >= SKIP_ACTIVE_LOG_INTERVAL
+            if enabled and time_due and has_active and should_log_skip:
+                self._last_skip_log = now
+                events.log_event(db, "poll", "scan_skip_active", {"reason": "active scan exists"})
             return False
         # 收紧竞态窗口：enabled 检查到创建 job 之间还有 DB 读，
         # 全局暂停可能在期间被设置 —— 创建 job 前再查一次。
         if not self._enabled_getter():
             return False
+        enqueued = self._enqueue_scan()
         self._last_run = now
-        self._enqueue_scan()
-        return True
+        return enqueued is not False
 
     # ---------- retention：24h 间隔自管理 ----------
 
@@ -162,14 +158,12 @@ class PollScheduler:
             try:
                 self.maybe_tick(now=self._clock())
             except Exception:
-                # 单次 tick 异常（DB 忙、配置读失败等）不杀死调度线程；
-                # 继续下一 tick 重试。
-                pass
+                logger.exception("Periodic scan scheduling failed")
             try:
                 # 周期清理：maybe_purge 内部有 24h 间隔判断
                 # （last_retention_run），每 tick 调用成本仅一次
                 # settings 读；异常不杀死调度循环。
                 self.maybe_purge()
             except Exception:
-                pass
+                logger.exception("Periodic history cleanup failed")
             self._stop.wait(self._tick_step)

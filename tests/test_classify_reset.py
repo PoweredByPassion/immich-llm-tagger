@@ -1,10 +1,4 @@
-"""M6 Task 3: reset_ops 的测试（§5.7）。
-
-- preview：unarchive 数 = change_log archive/apply 的 distinct asset 数；
-  标签集 = §5.8 管理标签 ∩ Immich list_tags 实际存在。
-- run_reset_steps：unarchive（404 WARN 跳过）→ 删标签对象 → 清 asset_state
-  （change_log / jobs / asset_records 保留）。
-"""
+"""Tests for ownership-aware reset and selected dimensions."""
 from __future__ import annotations
 
 import json
@@ -46,11 +40,12 @@ def seed_state(db, asset_id, **kw):
             ":manual_override, :rating, :description)", row)
 
 
-def seed_change(db, asset_id, action="archive", direction="apply"):
+def seed_change(db, asset_id, action="archive", direction="apply", payload=None):
     with db.connect() as conn:
         conn.execute(
             "INSERT INTO change_log (job_id, asset_id, action, direction, payload) "
-            "VALUES (1, ?, ?, ?, '{}')", (asset_id, action, direction))
+            "VALUES (1, ?, ?, ?, ?)",
+            (asset_id, action, direction, json.dumps(payload or {})))
 
 
 def seed_tag_change(db, asset_id, tag_name, direction="apply", job_id=None):
@@ -75,6 +70,7 @@ class FakeClient:
         self.deleted: list[str] = []
         self.untagged: list[tuple[str, list[str]]] = []
         self.albums: dict[str, str] = dict(albums or {})   # 相册名 → id
+        self.current_visibility: dict[str, str] = {}
         self.current_rating: dict[str, int] = {}           # asset_id → 评分
         self.current_description: dict[str, str] = {}
         self.set_props_calls: list[dict] = []
@@ -87,6 +83,7 @@ class FakeClient:
 
     def set_visibility(self, asset_ids, visibility):
         self.archived.append((list(asset_ids), visibility))
+        self.current_visibility.update({aid: visibility for aid in asset_ids})
 
     def delete_tag(self, tag_id):
         self.deleted.append(tag_id)
@@ -94,9 +91,7 @@ class FakeClient:
     def untag_assets(self, tag_id, asset_ids):
         self.untagged.append((tag_id, list(asset_ids)))
 
-    def list_albums(self):
-        from types import SimpleNamespace
-        # _remove_from_albums 用 a.album_name / str(a.id)
+    def list_asset_albums(self, asset_id):
         return [SimpleNamespace(album_name=n, id=i) for n, i in self.albums.items()]
 
     def remove_from_album(self, album_id, asset_ids):
@@ -108,16 +103,61 @@ class FakeClient:
             self.set_props_calls.append({"asset_id": a, **props})
 
     def get_asset(self, asset_id):
-        from types import SimpleNamespace
         if asset_id in self.missing_assets:
             raise ImmichError("404", status_code=404)
         self.get_asset_calls += 1
-        return SimpleNamespace(exif_info=SimpleNamespace(
-            rating=self.current_rating.get(asset_id),
-            description=self.current_description.get(asset_id)))
+        return SimpleNamespace(
+            visibility=self.current_visibility.get(asset_id, "archive"),
+            tags=self.list_tags(),
+            exif_info=SimpleNamespace(rating=self.current_rating.get(asset_id),
+                                      description=self.current_description.get(asset_id)))
+
 
 
 # --------------------------------------------------------------- preview
+
+def test_reset_preserves_archive_ownership_released_by_undo(db):
+    seed_change(db, "a1")
+    seed_change(db, "a1", action="timeline", direction="undo")
+    client = FakeClient()
+
+    result = ro.run_reset_steps(
+        db, client, job_id=2, is_canceled=lambda: False, dimensions={"classification"},
+    )
+
+    assert result["unarchived"] == 0
+    assert client.archived == []
+
+
+def test_reset_resumes_pending_step_without_second_remote_write(db):
+    import sqlite3
+
+    seed_change(db, "a1", action="rating_set", payload={"old": None, "new": 4})
+    client = FakeClient()
+    client.current_rating["a1"] = 4
+    with db.connect() as conn:
+        conn.execute(
+            "CREATE TRIGGER fail_reset_journal BEFORE INSERT ON change_log "
+            "WHEN NEW.direction='undo' BEGIN SELECT RAISE(ABORT, 'disk failure'); END"
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="disk failure"):
+        ro.run_reset_steps(db, client, job_id=2, is_canceled=lambda: False,
+                           dimensions={"rating"})
+    client.current_rating["a1"] = None
+    with db.connect() as conn:
+        conn.execute("DROP TRIGGER fail_reset_journal")
+
+    progress = []
+    result = ro.run_reset_steps(
+        db, client, job_id=2, is_canceled=lambda: False, dimensions={"rating"},
+        on_progress=lambda *values: progress.append(values),
+    )
+
+    assert result["restored_metadata"] == 1
+    assert client.set_props_calls == [{"asset_id": "a1", "rating": None}]
+    assert progress == [(0, 1, 0), (1, 1, 0)]
+    assert ro.reset_preview_counts(db)["rating"] == 0
+
 
 def test_preview_counts(db):
     insert_tag(db, "风景")
@@ -127,6 +167,8 @@ def test_preview_counts(db):
     seed_change(db, "a1")
     seed_change(db, "a1")  # 同 asset 两条 archive → distinct 只算 1
     seed_change(db, "a3")
+    seed_tag_change(db, "a1", "风景")
+    seed_tag_change(db, "a1", "天空")
     client = FakeClient(tag_names=("风景", "天空", "用户自有", "不在系统里"))
 
     unarchive_count, tag_names = ro.reset_preview(db, client)
@@ -135,12 +177,11 @@ def test_preview_counts(db):
     assert sorted(tag_names) == ["天空", "风景"]
 
 
-def test_preview_includes_state_only_names_that_exist(db):
-    """current_tag 不在 tags 表但 Immich 上存在 → 也算管理标签（§5.8）。"""
+def test_preview_omits_tags_without_confirmed_system_changes(db):
     seed_state(db, "a1", current_tag="孤儿标签")
     client = FakeClient(tag_names=("孤儿标签",))
     _, names = ro.reset_preview(db, client)
-    assert names == ["孤儿标签"]
+    assert names == []
 
 
 def test_preview_empty(db):
@@ -149,7 +190,7 @@ def test_preview_empty(db):
 
 # ------------------------------------------------------------ run_reset_steps
 
-def test_run_unarchives_untags_and_clears_state(db):
+def test_run_unarchives_and_records_each_confirmed_change(db):
     insert_tag(db, "风景")
     insert_tag(db, "天空", "marker")
     seed_state(db, "a1")
@@ -159,12 +200,10 @@ def test_run_unarchives_untags_and_clears_state(db):
     seed_change(db, "a9", action="tag_add")  # 非 archive 不参与 unarchive
     client = FakeClient(tag_names=("风景", "天空"))
 
-    with db.connect() as conn:
-        before_records = 0
     steps = ro.run_reset_steps(db, client, job_id=1,
                                is_canceled=lambda: False)
 
-    assert client.archived == [(["a1", "a2"], "timeline")]
+    assert client.archived == [(["a1"], "timeline"), (["a2"], "timeline")]
     assert client.deleted == []
     # 无 tag_add change_log → 不摘任何资产（seed_change 只写了 archive）
     assert client.untagged == []
@@ -173,8 +212,8 @@ def test_run_unarchives_untags_and_clears_state(db):
             "SELECT COUNT(*) c FROM asset_state").fetchone()["c"]
         n_change = conn.execute(
             "SELECT COUNT(*) c FROM change_log").fetchone()["c"]
-    assert n_state == 0
-    assert n_change == 3  # change_log 保留
+    assert n_state == 2
+    assert n_change == 5  # originals and one inverse for each successful write
     assert steps["unarchived"] == 2 and steps["untagged_tags"] == 0
 
 
@@ -198,6 +237,7 @@ def test_run_cancel_between_steps(db):
     """取消在步骤之间：unarchive 后取消 → 不摘标签，不进 finish 步。"""
     insert_tag(db, "风景")
     seed_change(db, "a1")
+    seed_tag_change(db, "a1", "风景")
     client = FakeClient(tag_names=("风景",))
     calls = {"n": 0}
 
@@ -240,8 +280,7 @@ def test_run_untags_only_system_tagged_assets(db):
                                is_canceled=lambda: False)
 
     assert client.deleted == []  # 不再删除标签实体
-    # 摘标按 (tag_id, [asset_ids]) 批量；只摘 change_log 记录的资产
-    assert client.untagged == [("id-风景", ["a1", "a2"])]
+    assert client.untagged == [("id-风景", ["a1"]), ("id-风景", ["a2"])]
     assert steps["untagged_tags"] == 1
     assert steps["deleted_tags"] == 0  # key 保留（恒 0），供 job_complete 事件兼容
 
@@ -260,7 +299,7 @@ def test_run_untag_writes_tag_remove_changelog(db):
     assert len(rows) == 1
     assert rows[0]["direction"] == "apply"
     assert rows[0]["job_id"] == 9
-    assert json.loads(rows[0]["payload"]) == {"tag_name": "风景"}
+    assert json.loads(rows[0]["payload"]) == {"tag_name": "风景", "tag_id": "id-风景"}
 
 
 def test_run_no_tag_add_log_means_no_untag(db):
@@ -311,21 +350,21 @@ def test_partial_reset_only_touches_selected_dimension(db):
     with db.connect() as conn:
         row = conn.execute("SELECT current_tag, visibility, rating, description "
                            "FROM asset_state WHERE asset_id='a1'").fetchone()
-    assert row["rating"] is None                       # 被清
+    assert row["rating"] == 4                          # 没有系统写入记录
     assert row["description"] == "旧描述"               # 未勾「描述」→ 必须原样保留
     assert row["current_tag"] == "风景"                 # 保留
     assert row["visibility"] == "timeline"              # 保留
 
 
-def test_full_dimensions_still_wipes_the_table(db):
-    """四个维度全勾 → 才走整表 DELETE（等价改动前的行为）。"""
-    seed_state(db, "a1")
+def test_full_reset_preserves_manual_override_and_unowned_state(db):
+    seed_state(db, "a1", manual_override=1)
     seed_state(db, "a2")
     ro.run_reset_steps(db, FakeClient(tag_names=()), job_id=1,
                        is_canceled=lambda: False,
                        dimensions={"tag", "classification", "rating", "description"})
     with db.connect() as conn:
-        assert conn.execute("SELECT COUNT(*) c FROM asset_state").fetchone()["c"] == 0
+        assert conn.execute("SELECT COUNT(*) c FROM asset_state").fetchone()["c"] == 2
+        assert conn.execute("SELECT manual_override FROM asset_state WHERE asset_id='a1'").fetchone()[0] == 1
 
 
 def test_classification_dimension_removes_from_albums(db):
@@ -363,7 +402,7 @@ def test_reset_rating_restores_old_but_skips_user_edited(db):
     assert client.set_props_calls == [{"asset_id": "a1", "rating": None}]
     assert steps["restored_metadata"] == 1
     (row,) = [r for r in _undo_rows(db) if r["action"] == "rating_set"]
-    assert json.loads(row["payload"]) == {"old": 4, "new": None}
+    assert json.loads(row["payload"]) == {"old": 4, "new": None, "reset": True}
 
 
 def test_reset_restore_skips_deleted_asset(db):
@@ -391,11 +430,11 @@ def test_reset_preview_counts_are_local_only(db):
     """预览必须是纯本地 SQL：函数签名里连 client 都没有，结构上就不发请求（§5.10）。"""
     import inspect
 
-    seed_change(db, "a1", action="rating_set")
-    seed_change(db, "a1", action="description_set")
-    seed_change(db, "a2", action="rating_set")
+    seed_change(db, "a1", action="rating_set", payload={"old": None, "new": 4})
+    seed_change(db, "a1", action="description_set", payload={"old": "", "new": "猫"})
+    seed_change(db, "a2", action="rating_set", payload={"old": None, "new": 5})
     seed_change(db, "a3", action="archive")
-    seed_change(db, "a4", action="tag_add")
+    seed_tag_change(db, "a4", "风景")
 
     assert "client" not in inspect.signature(ro.reset_preview_counts).parameters
     assert ro.reset_preview_counts(db) == {

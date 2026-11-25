@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -22,10 +23,16 @@ def db(tmp_path: Path) -> Database:
 class FakeClient:
     """记录调用的 Immich 客户端替身。untag_fail_tag 指定的 tag id 摘标时抛 404。"""
 
-    def __init__(self, existing_tags: tuple[str, ...] = ("cat", "screenshot"),
+    def __init__(self, existing_tags: tuple[str, ...] = ("cat", "screenshot", "未分类"),
                  untag_fail_tag: str | None = None):
         self._next = 0
         self.tags: dict[str, str] = {n: self._next_id() for n in existing_tags}
+        self.members = set(existing_tags) - {"未分类"}
+        self.albums = {"Pets": "album-id-Pets"}
+        self.album_members = {"Pets"}
+        self.visibility = "archive"
+        self.rating = 4
+        self.description = "一只猫"
         self.untag_fail_tag = untag_fail_tag
         self.untag_calls: list[tuple[str, str]] = []       # (tag_id, asset_id)
         self.tag_calls: list[tuple[str, str]] = []          # (tag_id, asset_id)
@@ -39,44 +46,54 @@ class FakeClient:
         return f"tag-id-{self._next}"
 
     def list_tags(self):
-        from types import SimpleNamespace
         return [SimpleNamespace(name=n, id=i) for n, i in self.tags.items()]
 
-    def ensure_tags(self, names: list[str]) -> dict[str, str]:
-        for n in names:
-            if n not in self.tags:
-                self.tags[n] = self._next_id()
-        return {n: self.tags[n] for n in names}
+    def get_asset(self, asset_id):
+        return SimpleNamespace(
+            tags=[tag for tag in self.list_tags() if tag.name in self.members],
+            visibility=self.visibility,
+            exif_info=SimpleNamespace(rating=self.rating, description=self.description),
+        )
+
+    def list_albums(self):
+        return [SimpleNamespace(album_name=n, id=i) for n, i in self.albums.items()]
+
+    def list_asset_albums(self, asset_id):
+        return [album for album in self.list_albums() if album.album_name in self.album_members]
 
     def tag_assets(self, tag_ids: list[str], asset_ids: list[str]) -> None:
         for t in tag_ids:
             for a in asset_ids:
                 self.tag_calls.append((t, a))
+                self.members.update(name for name, tag_id in self.tags.items() if tag_id == t)
 
     def untag_assets(self, tag_id: str, asset_ids: list[str]) -> None:
         for a in asset_ids:
             if tag_id == self.untag_fail_tag:
                 raise ImmichError("not found", status_code=404)
             self.untag_calls.append((tag_id, a))
+            self.members.difference_update(name for name, current in self.tags.items() if current == tag_id)
 
     def set_visibility(self, asset_ids: list[str], visibility: str) -> None:
         for a in asset_ids:
             self.visibility_calls.append((a, visibility))
-
-    def ensure_album(self, name: str) -> str:
-        return f"album-id-{name}"
+            self.visibility = visibility
 
     def add_to_album(self, album_id: str, asset_ids: list[str]) -> None:
         for a in asset_ids:
             self.add_album_calls.append((album_id, a))
+            self.album_members.update(name for name, current in self.albums.items() if current == album_id)
 
     def remove_from_album(self, album_id: str, asset_ids: list[str]) -> None:
         for a in asset_ids:
             self.remove_album_calls.append((album_id, a))
+            self.album_members.difference_update(name for name, current in self.albums.items() if current == album_id)
 
     def set_asset_properties(self, asset_ids: list[str], **props) -> None:
         for a in asset_ids:
             self.set_props_calls.append({"asset_id": a, **props})
+            for field, value in props.items():
+                setattr(self, field, value)
 
 
 def seed_apply_log(db: Database, job_id: int, rows: list[tuple[str, str, dict]]) -> None:
@@ -139,7 +156,6 @@ def test_undo_in_reverse_order(db: Database) -> None:
     ]
     for r in rows:
         assert s.undo_row(r) is True
-    s.flush_state()
     # 恢复队列标签在最前（tag_calls[0]），摘标签在最后（untag_calls[-1]）
     queue_id = client.tags["未分类"]
     assert client.tag_calls[0] == (queue_id, "a-1")
@@ -163,11 +179,13 @@ def test_undo_records_written_with_inverse_actions(db: Database) -> None:
         s.undo_row(r)
     rows = undo_log(db, 2)
     by_action = {r["action"]: json.loads(r["payload"]) for r in rows}
-    assert by_action["queue_restore"] == {"queue_tag_name": "未分类"}
-    assert by_action["album_remove"] == {"album_name": "Pets"}
+    assert by_action["queue_restore"]["queue_tag_name"] == "未分类"
+    assert by_action["album_remove"]["album_id"] == "album-id-Pets"
     # 撤销 archive → timeline；from_visibility 是恢复前的值（archive 设置后的值）
-    assert by_action["timeline"] == {"from_visibility": "archive"}
-    assert by_action["tag_remove"] == {"tag_name": "cat"}
+    assert by_action["timeline"]["from_visibility"] == "archive"
+    assert by_action["timeline"]["to_visibility"] == "timeline"
+    assert by_action["tag_remove"]["tag_id"] == client.tags["cat"]
+    assert {p["undo_of"] for p in by_action.values()} == {1, 2, 3, 4}
     assert all(r["asset_id"] == "a-1" for r in rows)
 
 
@@ -233,7 +251,6 @@ def test_asset_state_written_back(db: Database) -> None:
     s = UndoSession(db, client, undo_job_id=2)
     for r in s.load_rows(1):
         s.undo_row(r)
-    s.flush_state()
     row = state_row(db, "a-1")
     assert row["current_tag"] is None
     assert json.loads(row["current_markers"]) == []
@@ -250,7 +267,6 @@ def test_state_visibility_untouched_without_visibility_rows(db: Database) -> Non
     s = UndoSession(db, client, undo_job_id=2)
     for r in s.load_rows(1):
         s.undo_row(r)
-    s.flush_state()
     row = state_row(db, "a-1")
     assert row["current_tag"] is None
     assert row["visibility"] == "archive"
@@ -266,6 +282,10 @@ def test_undo_of_undo_actions_is_re_undoable(db: Database) -> None:
         ("timeline", "a-1", {"from_visibility": "archive"}),
     ])
     client = FakeClient()
+    client.members.remove("cat")
+    client.members.add("未分类")
+    client.album_members.clear()
+    client.visibility = "timeline"
     s = UndoSession(db, client, undo_job_id=2)
     for r in s.load_rows(1):
         assert s.undo_row(r) is True
@@ -281,9 +301,9 @@ def test_undo_of_undo_actions_is_re_undoable(db: Database) -> None:
 def test_undo_timeline_restores_archive(db: Database) -> None:
     seed_apply_log(db, 1, [("timeline", "a-1", {"from_visibility": "archive"})])
     client = FakeClient()
+    client.visibility = "timeline"
     s = UndoSession(db, client, undo_job_id=2)
     s.undo_row(s.load_rows(1)[0])
-    s.flush_state()
     assert client.visibility_calls == [("a-1", "archive")]
     assert state_row(db, "a-1")["visibility"] == "archive"
 
@@ -294,12 +314,11 @@ def test_undo_rating_restores_old_and_swaps_payload(db: Database) -> None:
     s = UndoSession(db, client, undo_job_id=2)
     for r in s.load_rows(1):
         assert s.undo_row(r) is True
-    s.flush_state()
 
     assert client.set_props_calls == [{"asset_id": "a-1", "rating": None}]
     (row,) = undo_log(db, 2)
     assert row["action"] == "rating_set"
-    assert json.loads(row["payload"]) == {"old": 4, "new": None}   # 已对调
+    assert json.loads(row["payload"]) == {"old": 4, "new": None, "undo_of": 1}
 
 
 def test_undo_description_empty_string_when_old_absent(db: Database) -> None:
@@ -321,8 +340,106 @@ def test_undo_syncs_asset_state_metadata(db: Database) -> None:
     s = UndoSession(db, client, undo_job_id=2)
     for r in s.load_rows(1):
         s.undo_row(r)
-    s.flush_state()
 
     row = state_row(db, "a-1")
     assert row["rating"] is None and row["description"] == ""
     assert row["current_tag"] == "cat"      # 未涉及的列原样保留
+
+
+def test_undo_preserves_a_rating_edited_after_the_job(db: Database) -> None:
+    seed_apply_log(db, 1, [("rating_set", "a-1", {"old": None, "new": 3})])
+    client = FakeClient()
+    client.rating = 5
+
+    session = UndoSession(db, client, undo_job_id=2)
+
+    assert not session.undo_row(session.load_rows(1)[0])
+    assert client.set_props_calls == []
+    assert undo_log(db, 2) == []
+
+
+def test_undo_does_not_recreate_a_deleted_album(db: Database) -> None:
+    seed_apply_log(db, 1, [("album_add", "a-1", {"album_name": "Pets", "album_id": "old"})])
+    client = FakeClient()
+    client.albums.clear()
+
+    session = UndoSession(db, client, undo_job_id=2)
+
+    assert not session.undo_row(session.load_rows(1)[0])
+    assert client.remove_album_calls == []
+
+
+def test_undo_does_not_use_a_different_album_with_the_same_name(db: Database) -> None:
+    seed_apply_log(db, 1, [("album_add", "a-1", {"album_name": "Pets", "album_id": "old"})])
+    client = FakeClient()
+    client.albums["Pets"] = "replacement"
+
+    session = UndoSession(db, client, undo_job_id=2)
+
+    assert not session.undo_row(session.load_rows(1)[0])
+    assert client.remove_album_calls == []
+
+
+def test_undo_cancels_a_chain_in_reverse_order(db: Database) -> None:
+    seed_apply_log(db, 1, [
+        ("rating_set", "a-1", {"old": None, "new": 3}),
+        ("rating_set", "a-1", {"old": 3, "new": 4}),
+    ])
+    client = FakeClient()
+    session = UndoSession(db, client, undo_job_id=2)
+
+    for row in session.load_rows(1):
+        assert session.undo_row(row)
+
+    assert [call["rating"] for call in client.set_props_calls] == [3, None]
+    assert session.progress() == (2, 0)
+    assert session.load_rows(1) == []
+
+
+def test_undo_reconciles_successful_write_after_local_commit_failure(db: Database) -> None:
+    import sqlite3
+
+    seed_apply_log(db, 1, [("rating_set", "a-1", {"old": None, "new": 4})])
+    with db.connect() as conn:
+        conn.execute(
+            "CREATE TRIGGER fail_undo_journal BEFORE INSERT ON change_log "
+            "WHEN NEW.direction='undo' BEGIN SELECT RAISE(ABORT, 'disk failure'); END"
+        )
+    client = FakeClient()
+    interrupted = UndoSession(db, client, undo_job_id=2)
+    with pytest.raises(sqlite3.IntegrityError, match="disk failure"):
+        interrupted.undo_row(interrupted.load_rows(1)[0])
+    assert client.rating is None
+    with db.connect() as conn:
+        conn.execute("DROP TRIGGER fail_undo_journal")
+
+    resumed = UndoSession(db, client, undo_job_id=2)
+    assert resumed.undo_row(resumed.load_rows(1)[0])
+    assert client.set_props_calls == [{"asset_id": "a-1", "rating": None}]
+    assert len(undo_log(db, 2)) == 1
+
+
+def test_undo_prepares_unrecorded_completed_writes_for_selected_job(db: Database) -> None:
+    with db.connect() as conn:
+        conn.execute("INSERT INTO asset_state (asset_id, process_status) VALUES ('a-1','pending')")
+        conn.execute(
+            "INSERT INTO pending_effects (asset_id, job_id, batches, in_flight) "
+            "VALUES ('a-1', ?, ?, 1)",
+            (1, json.dumps([[["rating_set", {"old": None, "new": 4}]]])),
+        )
+        conn.execute(
+            "INSERT INTO pending_effects (asset_id, job_id, batches, in_flight) "
+            "VALUES ('different-asset', ?, ?, 1)",
+            (3, json.dumps([[["rating_set", {"old": None, "new": 4}]]])),
+        )
+    client = FakeClient()
+    session = UndoSession(db, client, undo_job_id=2)
+
+    session.prepare(1)
+
+    assert session.total(1) == 1
+    assert session.undo_row(session.load_rows(1)[0])
+    assert client.set_props_calls == [{"asset_id": "a-1", "rating": None}]
+    with db.connect() as conn:
+        kept = conn.execute("SELECT job_id FROM pending_effects").fetchall()
+    assert [row["job_id"] for row in kept] == [3]

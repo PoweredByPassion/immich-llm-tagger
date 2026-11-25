@@ -218,8 +218,8 @@ def test_overview_counts(db) -> None:
     with db.connect() as conn:
         conn.execute("UPDATE jobs SET done = 3, total = 10 WHERE id = ?", (j1,))
         conn.execute(
-            "INSERT INTO asset_records (asset_id, source, status) "
-            "VALUES ('x', 'webhook', 'ok')")
+            "INSERT INTO asset_records (asset_id, source, status, applied_at) "
+            "VALUES ('x', 'webhook', 'ok', datetime('now'))")
         conn.execute(
             "INSERT INTO asset_records (asset_id, source, status) "
             "VALUES ('y', 'webhook', 'error')")
@@ -257,11 +257,11 @@ def test_overview_processed_today_counts_all_ok_not_error(db) -> None:
     from app.store import queries
     with db.connect() as conn:
         conn.execute(
-            "INSERT INTO asset_records (asset_id, source, status) "
-            "VALUES ('x1', 'webhook', 'ok')")
+            "INSERT INTO asset_records (asset_id, source, status, applied_at) "
+            "VALUES ('x1', 'webhook', 'ok', datetime('now'))")
         conn.execute(
-            "INSERT INTO asset_records (asset_id, source, status) "
-            "VALUES ('x2', 'webhook', 'ok')")
+            "INSERT INTO asset_records (asset_id, source, status, applied_at) "
+            "VALUES ('x2', 'webhook', 'ok', datetime('now'))")
         conn.execute(
             "INSERT INTO asset_records (asset_id, source, status) "
             "VALUES ('y', 'webhook', 'error')")
@@ -289,7 +289,7 @@ def test_overview_today_boundary_respects_timezone(db) -> None:
         pytest.skip("仅在 UTC 00:00-00:30 之间运行才稳定，其余时间该 case 不确定")
     with db.connect() as conn:
         conn.execute(
-            "INSERT INTO asset_records (asset_id, source, status, created_at) "
+            "INSERT INTO asset_records (asset_id, source, status, applied_at) "
             "VALUES ('tz1', 'webhook', 'ok', ?)",
             (now.strftime("%Y-%m-%d %H:%M:%S"),))
     utc_view = queries.overview(db)
@@ -306,8 +306,8 @@ def test_overview_invalid_timezone_falls_back_to_utc(db) -> None:
 
     with db.connect() as conn:
         conn.execute(
-            "INSERT INTO asset_records (asset_id, source, status) "
-            "VALUES ('t1', 'webhook', 'ok')")
+            "INSERT INTO asset_records (asset_id, source, status, applied_at) "
+            "VALUES ('t1', 'webhook', 'ok', datetime('now'))")
     fallback = queries.overview(db, tz_name="Not/AZone")
     utc = queries.overview(db, tz_name=None)
     assert fallback["processed_today"] == utc["processed_today"] == 1
@@ -329,7 +329,7 @@ def test_overview_shanghai_includes_utc_yesterday_evening(db) -> None:
             hour=20, minute=0, second=0, microsecond=0
         ).strftime("%Y-%m-%d %H:%M:%S")
         conn.execute(
-            "INSERT INTO asset_records (asset_id, source, status, created_at) "
+            "INSERT INTO asset_records (asset_id, source, status, applied_at) "
             "VALUES ('tz2', 'webhook', 'ok', ?)",
             (ts,))
     shanghai_view = queries.overview(db, tz_name="Asia/Shanghai")
@@ -387,7 +387,7 @@ def test_write_changes_and_state_metadata_optional(db: Database) -> None:
 
 # ---------- last_written_value / bumped_apply_attempts ----------
 
-def test_last_written_value_returns_latest_apply_new(db: Database) -> None:
+def test_last_written_value_returns_latest_effective_new(db: Database) -> None:
     with db.connect() as conn:
         conn.execute(
             "INSERT INTO change_log (asset_id, action, direction, payload) "
@@ -395,11 +395,11 @@ def test_last_written_value_returns_latest_apply_new(db: Database) -> None:
         conn.execute(
             "INSERT INTO change_log (asset_id, action, direction, payload) "
             "VALUES ('a1', 'rating_set', 'apply', '{\"old\": 4, \"new\": 5}')")
-        # undo 记录不算数
+        # Undo cancels the latest application, restoring our earlier value.
         conn.execute(
             "INSERT INTO change_log (asset_id, action, direction, payload) "
             "VALUES ('a1', 'rating_set', 'undo', '{\"old\": 5, \"new\": 4}')")
-    assert store_assets.last_written_value(db, "a1", "rating_set") == 5
+    assert store_assets.last_written_value(db, "a1", "rating_set") == 4
 
 
 def test_last_written_value_none_when_absent(db: Database) -> None:

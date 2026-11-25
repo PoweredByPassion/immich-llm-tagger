@@ -3,11 +3,11 @@
 导出六张配置表为可序列化 dict；marker_rules 的 tags FK 在导出里用**引用
 标签名**表示（tag_name），导入时按名称重映射到重建后的新 id。
 导入文件中残留的 categories 段（旧版本导出）自动忽略。
-敏感字段不导出：settings.webhook_token、settings.active_prompt_version_id，
-以及连接凭证（immich_conn / llm_conn 两张独立表，天然不在导出范围）。
+敏感字段与实例隐私许可不导出。激活版本通过提示词条目的 active 标识迁移，
+导入后使用新数据库生成的版本 ID。
 
 导入是单事务：清空六表 → 按依赖顺序重建（tags 先）→ 敏感字段回写现值 →
-active_prompt_version_id 置 null → validate_config 全量校验，任一失败抛
+恢复激活版本 → validate_config 全量校验，任一失败抛
 ValidationError 并整体回滚（调用方通过 db.connect() 的异常回滚保证）。
 YAML 解析错误、顶层结构非法转 ValidationError（problems 为 i18n key + 参数，
 由 web 层按请求语言渲染）。
@@ -15,6 +15,7 @@ YAML 解析错误、顶层结构非法转 ValidationError（problems 为 i18n ke
 from __future__ import annotations
 
 import json
+import sqlite3
 from typing import Any
 
 import yaml
@@ -28,13 +29,15 @@ _TABLES = (
     "exclusions", "prompt_versions", "settings",
 )
 
-# settings 导出时剔除的敏感键（webhook_token、active_prompt_version_id；
-# 连接 api_key 存于 immich_conn/llm_conn 独立表，不在 settings，天然不导出）
-_SENSITIVE_SETTINGS_KEYS = ("webhook_token", "active_prompt_version_id")
+# Exclude instance-specific credentials, permissions and internal IDs.
+_SENSITIVE_SETTINGS_KEYS = ("webhook_token", "active_prompt_version_id",
+                            "llm_paused_reason", "last_retention_run",
+                            "allow_cloud_images", "retain_model_payloads")
 
 
 def export_config(db: Database) -> dict[str, Any]:
     with db.connect() as conn:
+        conn.execute("BEGIN")
         tags = [dict(r) for r in conn.execute(
             "SELECT name, description, kind, archive, album, min_confidence, "
             "       enabled, skip_immich, write_rating, write_description "
@@ -66,6 +69,9 @@ def export_config(db: Database) -> dict[str, Any]:
         k: v for k, v in raw_settings.items()
         if k not in _SENSITIVE_SETTINGS_KEYS
     }
+    for prompt in prompts:
+        if prompt["id"] == raw_settings.get("active_prompt_version_id"):
+            prompt["active"] = True
 
     return {
         "tags": tags,
@@ -83,7 +89,7 @@ def import_config(db: Database, data: Any) -> None:
     unknown = set(data) - set(_TABLES) - {"categories"}
     if unknown:
         raise ValidationError([Problem(
-            "store.transfer.unknown_section", (", ".join(sorted(unknown)),)
+            "store.transfer.unknown_section", (", ".join(sorted(map(str, unknown))),)
         )])
 
     def section(name: str) -> list[dict]:
@@ -100,13 +106,11 @@ def import_config(db: Database, data: Any) -> None:
 
     try:
         with db.connect() as conn:
-            # 敏感字段先读现值，重建后回写
-            preserved = {
-                k: v for k, v in
-                {r["key"]: r["value"] for r in conn.execute(
-                    "SELECT key, value FROM settings WHERE key IN (?, ?)",
-                    _SENSITIVE_SETTINGS_KEYS).fetchall()}.items()
-            }
+            conn.execute("BEGIN IMMEDIATE")
+            preserved = {row["key"]: row["value"] for row in conn.execute(
+                "SELECT key, value FROM settings WHERE key IN "
+                "('webhook_token','llm_paused_reason','last_retention_run','allow_cloud_images','retain_model_payloads')",
+            )}
 
             for t in ("scope_rules", "exclusions", "prompt_versions",
                       "marker_rules", "tags", "settings"):
@@ -159,20 +163,27 @@ def import_config(db: Database, data: Any) -> None:
                     (r["type"], r.get("value", ""), int(r.get("enabled", 1))),
                 )
 
+            active_prompt_id = None
             for r in section("prompt_versions"):
-                conn.execute(
+                cur = conn.execute(
                     "INSERT INTO prompt_versions (body, note, created_at) "
-                    "VALUES (?, ?, ?)",
+                    "VALUES (?, ?, COALESCE(?, datetime('now')))",
                     (r["body"], r.get("note", ""), r.get("created_at")),
                 )
+                if r.get("active") is True:
+                    if active_prompt_id is not None:
+                        raise ValueError("Only one prompt version can be active")
+                    active_prompt_id = cur.lastrowid
 
             for k, v in settings_in.items():
+                if k in _SENSITIVE_SETTINGS_KEYS:
+                    continue
                 conn.execute(
                     "INSERT INTO settings (key, value) VALUES (?, ?)",
                     (k, json.dumps(v, ensure_ascii=False)),
                 )
 
-            # 敏感字段保留现值；active_prompt_version_id 置 null
+            # Restore instance-local settings and map the selected prompt to its new ID.
             for k, v in preserved.items():
                 conn.execute(
                     "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
@@ -180,7 +191,7 @@ def import_config(db: Database, data: Any) -> None:
                 )
             conn.execute(
                 "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
-                ("active_prompt_version_id", json.dumps(None)),
+                ("active_prompt_version_id", json.dumps(active_prompt_id)),
             )
 
             # 全量快照校验，任一失败 → 异常 → connect() 回滚
@@ -197,13 +208,13 @@ def import_config(db: Database, data: Any) -> None:
                 ).fetchone()["value"]) if conn.execute(
                     "SELECT 1 FROM settings WHERE key = 'fallback_tag_name'"
                 ).fetchone() else "other",
-                active_prompt_version_id=None,
+                active_prompt_version_id=active_prompt_id,
                 prompt_version_ids={r["id"] for r in conn.execute(
                     "SELECT id FROM prompt_versions").fetchall()},
             )
     except ValidationError:
         raise
-    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as e:
+    except (KeyError, TypeError, ValueError, sqlite3.IntegrityError) as e:
         raise ValidationError([Problem("store.transfer.structure_invalid", (str(e),))]) from None
 
 

@@ -1,22 +1,39 @@
 """asset_state 与 change_log 的本地读写。"""
 from __future__ import annotations
 
+import json
 import sqlite3
 
+from app.classify.ownership import VISIBILITY, effective_changes
 from app.db.connection import Database
+from app.store.settings import DEFAULTS
+
+
+def processing_complete(conn: sqlite3.Connection, asset_id: str) -> bool:
+    """Use durable completion state, with a fallback for legacy asset rows."""
+    state = conn.execute(
+        "SELECT process_status,apply_attempts FROM asset_state WHERE asset_id=?", (asset_id,),
+    ).fetchone()
+    if state and state["process_status"] is not None:
+        return state["process_status"] in {"applied", "failed"}
+
+    latest = conn.execute(
+        "SELECT applied_at FROM asset_records WHERE asset_id=? AND dry_run=0 "
+        "ORDER BY created_at DESC,id DESC LIMIT 1", (asset_id,),
+    ).fetchone()
+    if latest and latest["applied_at"] is not None:
+        return True
+    if state is None or not state["apply_attempts"]:
+        return False
+    threshold = conn.execute("SELECT value FROM settings WHERE key='apply_max_attempts'").fetchone()
+    attempts = json.loads(threshold["value"]) if threshold else DEFAULTS["apply_max_attempts"]
+    return state["apply_attempts"] >= int(attempts)
 
 
 def has_system_archive(db: Database, asset_id: str) -> bool:
-    """change_log 里是否存在该 asset 的本系统归档记录
-    （action='archive' AND direction='apply'；undo 记录不算数）。"""
-    with db.connect() as conn:
-        row = conn.execute(
-            "SELECT 1 FROM change_log "
-            " WHERE asset_id = :aid AND action = 'archive' AND direction = 'apply' "
-            " LIMIT 1",
-            {"aid": asset_id},
-        ).fetchone()
-    return row is not None
+    """True while the latest effective visibility edit is a system archive."""
+    return any(chain[-1].after == "archive"
+               for chain in effective_changes(db, asset_id, VISIBILITY))
 
 
 def write_changes_and_state(
@@ -64,13 +81,12 @@ def write_changes_and_state(
 
 # ---------- 读查询 ----------
 
-import json
-
 _RECORD_FIELDS = (
     "r.id, r.asset_id, r.job_id, r.prompt_version_id, r.source, "
     "r.predicted_tag, r.confidence, r.markers, r.model, r.usage, "
     "r.duration_ms, r.status, r.raw_response, r.dry_run, r.created_at, "
     "r.applied_at, r.llm_request, r.filename, r.rating, r.description, "
+    "r.apply_status, r.apply_error, r.analysis_record_id, "
     "s.current_tag AS current_tag, s.visibility AS visibility, "
     "s.apply_attempts AS apply_attempts"
 )
@@ -97,8 +113,9 @@ def _record_filters(
     """
     where, params = ["1=1"], {}
     if status is not None and include_unapplied and status == "error":
-        where.append("(r.status = 'error' OR (r.status = 'ok' "
-                     "AND r.applied_at IS NULL AND r.dry_run = 0))")
+        where.append("(r.status = 'error' OR (r.dry_run = 0 AND "
+                     "(r.apply_status IN ('pending','failed') OR "
+                     "(r.apply_status IS NULL AND r.status='ok' AND r.applied_at IS NULL))))")
     elif status is not None:
         where.append("r.status = :status")
         params["status"] = status
@@ -271,21 +288,9 @@ def count_changes_for_job(db: Database, job_id: int) -> tuple[int, int]:
 
 
 def last_written_value(db: Database, asset_id: str, action: str) -> object | None:
-    """本系统最近一次 apply 写入某字段的 new 值（判定"是否我们自己写的"）。
-    找不到记录返回 None。payload 解析失败按 None 处理。"""
-    with db.connect() as conn:
-        row = conn.execute(
-            "SELECT payload FROM change_log "
-            " WHERE asset_id = ? AND action = ? AND direction = 'apply' "
-            " ORDER BY id DESC LIMIT 1",
-            (asset_id, action),
-        ).fetchone()
-    if row is None:
-        return None
-    try:
-        return json.loads(row["payload"]).get("new")
-    except (TypeError, ValueError):
-        return None
+    """Latest value still attributable to the system after undo and reset."""
+    chains = effective_changes(db, asset_id, (action,))
+    return chains[0][-1].after if chains else None
 
 
 def bumped_apply_attempts(db: Database, asset_id: str) -> int:

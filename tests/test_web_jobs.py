@@ -51,6 +51,28 @@ def _write_record(db, asset_id: str, job_id: int, *, status: str = "error") -> N
 
 # ------------------------------------------------------------- list page
 
+def test_undo_detail_lists_only_its_own_skipped_changes(client):
+    from app.store.events import log_event
+
+    db = client.app.state.db
+    job_id = jobs_store.create_job(db, "undo", {"target_job_id": 123})
+    jobs_store.finish_job(db, job_id)
+    log_event(db, "system", "undo_change_skipped", {
+        "job_id": job_id, "asset_id": "kept-edit", "action": "rating_set",
+        "reason": "changed_or_missing",
+    })
+    log_event(db, "system", "undo_change_skipped", {
+        "job_id": job_id + 1, "asset_id": "other-edit", "action": "rating_set",
+        "reason": "changed_or_missing",
+    })
+
+    html = client.get(f"/jobs/{job_id}").text
+
+    assert "已跳过的变更" in html
+    assert "/assets/kept-edit" in html
+    assert "/assets/other-edit" not in html
+
+
 def test_list_empty_state(client):
     c = client
     html = c.get("/jobs").text
@@ -379,6 +401,32 @@ def test_sse_job_frames(client):
     assert payload["status"] == "running"
 
 
+def test_job_browser_subscribes_to_named_summary_updates(client):
+    job_id = _running_job(client.app.state.db)
+    page = client.get(f"/jobs/{job_id}").text
+    assert f'sse-connect="/api/sse/job/{job_id}?view=html"' in page
+    assert 'sse-swap="job-progress"' in page
+    msgs = _collect_sse_frames(
+        client.app, f"/api/sse/job/{job_id}?view=html", n_frames=1,
+    )
+    body = next(m["body"] for m in msgs if m["type"] == "http.response.body")
+    assert body.startswith(b"event: job-progress\n")
+    assert b"data-job-progress" in body
+
+
+def test_terminal_job_sends_result_and_closes_browser_stream(client):
+    db = client.app.state.db
+    job_id = _running_job(db)
+    jobs_store.finish_job(db, job_id)
+    msgs = _collect_sse_frames(
+        client.app, f"/api/sse/job/{job_id}?view=html", n_frames=2,
+    )
+    bodies = [m for m in msgs if m["type"] == "http.response.body"]
+    assert bodies[0]["body"].startswith(b"event: job-result\n")
+    assert bodies[-1]["more_body"] is False
+    assert "sse-connect=" not in client.get(f"/jobs/{job_id}").text
+
+
 def test_sse_unknown_job():
     """job 不存在时：仍 200 SSE，首帧 status=not_found（选简单方案：
     不做 404 短路，浏览器端 sse-swap 收到 not_found 也不更新数字）。"""
@@ -422,6 +470,14 @@ def test_undo_button_on_done_job_with_apply_log(client):
     assert f'/jobs/{jid}/undo' in html
     assert "回滚此任务" in html
     assert "将撤销 3 条变更（3 张图片）" in html
+
+
+def test_undo_button_on_failed_job_with_confirmed_partial_writes(client):
+    db = client.app.state.db
+    job_id = _done_apply_job(db, n_assets=1)
+    jobs_store.finish_job(db, job_id, error="Immich write failed")
+
+    assert f'/jobs/{job_id}/undo' in client.get(f"/jobs/{job_id}").text
 
 
 def test_no_undo_button_on_running_job(client):

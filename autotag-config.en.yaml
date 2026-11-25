@@ -1,4 +1,5 @@
 settings:
+  sensitive_marker_tag_name: "sensitive"
   queue_tag_name: "unclassified"
   fallback_tag_name: "other"
   default_min_confidence: 0.8
@@ -37,7 +38,7 @@ tags:
     album: "ID Documents"
     min_confidence: 0.85
     write_rating: true
-    write_description: true
+    write_description: false
     enabled: true
 
   - name: "meme"

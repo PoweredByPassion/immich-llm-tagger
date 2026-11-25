@@ -24,6 +24,15 @@ def test_from_dto_reads_exif_rating_and_description():
     assert snap.visibility == "timeline"
 
 
+def test_snapshot_preserves_whitespace_edits_in_descriptions():
+    from types import SimpleNamespace as NS
+
+    from app.classify.snapshot import AssetSnapshot
+
+    dto = NS(exif_info=NS(description="  一只猫 "))
+    assert AssetSnapshot.from_dto(dto).description == "  一只猫 "
+
+
 def test_from_dto_without_exif_info():
     from types import SimpleNamespace as NS
     from app.classify.snapshot import AssetSnapshot

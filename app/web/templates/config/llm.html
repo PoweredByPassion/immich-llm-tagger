@@ -13,6 +13,9 @@
 
   <div class="card p-6 space-y-6">
     <form method="post" action="/config/llm" class="space-y-5">
+      {% if settings.llm_paused_reason %}
+      <p role="alert" class="text-sm text-amber-300">{{ tr("config.llm.paused") }} {{ settings.llm_paused_reason }}</p>
+      {% endif %}
       <div>
         <label for="base_url" class="mb-1.5 block text-xs font-medium text-[#8a8f98]">{{ tr("config.common.server_url") }}</label>
         <input type="url" id="base_url" name="base_url" value="{{ conn.base_url }}" required
@@ -69,6 +72,21 @@
       </div>
 
       <div class="border-t border-[#20232d] pt-5 space-y-4">
+        <fieldset class="space-y-3">
+          <input type="hidden" name="privacy_settings" value="1">
+          <label class="flex items-center gap-2 text-xs">
+            <input type="checkbox" name="allow_cloud_images" {% if settings.allow_cloud_images %}checked{% endif %}>
+            {{ tr("config.llm.allow_cloud_images") }}
+          </label>
+          <label class="flex items-center gap-2 text-xs">
+            <input type="checkbox" name="retain_model_payloads" {% if settings.retain_model_payloads %}checked{% endif %}>
+            {{ tr("config.llm.retain_model_payloads") }}
+          </label>
+          <label class="block text-xs">
+            {{ tr("config.llm.sensitive_marker") }}
+            <input name="sensitive_marker_tag_name" value="{{ settings.sensitive_marker_tag_name }}" class="input mt-1">
+          </label>
+        </fieldset>
         <div>
           <div class="text-xs font-medium text-[#f1f3f9]">{{ tr("config.llm.thumb_title") }}</div>
           <div class="text-xs text-[#8a8f98] mt-0.5">{{ tr("config.llm.thumb_desc") }}</div>

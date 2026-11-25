@@ -1,8 +1,7 @@
 """POST /api/hooks/immich —— webhook 接收端点契约（M3 Task 3, §5.1）。
 
 契约矩阵（计划 §9）：标准 WorkflowEventPayload（data.asset.id）· 只转发 data
-（asset.id）· assetId · id · 数组 · 非 JSON（200 + parse_fail，不回 400 ——
-Immich 不在乎响应码，原始留存就是为了缓冲 Immich 版本变化）· VIDEO 跳过 ·
+（asset.id）· assetId · id · 数组 · 非 JSON（200 + parse_fail，记录大小与条数）· VIDEO 跳过 ·
 无 id 兜底 scan。
 """
 from __future__ import annotations
@@ -19,7 +18,6 @@ from app.config import BootstrapConfig
 from app.db.connection import Database
 from app.db.migrate import migrate
 from app.store.events import tail_events
-from app.store.jobs import get_job
 from app.store.settings import SettingsStore
 from app.web.app import create_app
 
@@ -122,20 +120,7 @@ def test_standard_payload_data_asset_id(ctx):
     client, token, db = ctx
     assert _post(client, token, {"data": {"asset": _ASSET}}).status_code == 200
     params = _job_params(db)
-    assert params == [
-        {
-            "asset_id": "asset-1",
-            "source": "webhook",
-            "asset_hint": {
-                "originalFileName": "IMG_2043.HEIC",
-                "exifInfo": {"make": "Apple"},
-                "libraryId": "lib-1",
-                "originalPath": "/icloud/a.jpg",
-                "tags": [{"id": "t1", "name": "未分类"}],
-                "type": "IMAGE",
-            },
-        }
-    ]
+    assert params == [{"asset_id": "asset-1", "source": "webhook"}]
 
 
 def test_data_only_payload_asset_id(ctx):
@@ -148,13 +133,20 @@ def test_asset_id_form(ctx):
     client, token, db = ctx
     assert _post(client, token, {"assetId": "asset-1"}).status_code == 200
     assert [p["asset_id"] for p in _job_params(db)] == ["asset-1"]
-    assert _job_params(db)[0]["asset_hint"] == {}
+    assert "asset_hint" not in _job_params(db)[0]
 
 
 def test_bare_id_form(ctx):
     client, token, db = ctx
     assert _post(client, token, {"id": "asset-1"}).status_code == 200
     assert [p["asset_id"] for p in _job_params(db)] == ["asset-1"]
+
+
+def test_wrapped_direct_asset_id_form(ctx):
+    client, token, db = ctx
+    assert _post(client, token, {"data": {"assetId": "asset-1"}}).status_code == 200
+    assert [p["asset_id"] for p in _job_params(db)] == ["asset-1"]
+    assert _scan_count(db) == 0
 
 
 def test_array_of_assets(ctx):
@@ -248,7 +240,7 @@ def test_dry_run_record_does_not_skip(ctx):
     assert len(_job_params(db)) == 1
 
 
-def test_out_of_scope_not_enqueued(ctx):
+def test_scope_uses_immich_metadata_in_background(ctx):
     client, token, db = ctx
     with db.connect() as conn:
         conn.execute(
@@ -256,8 +248,42 @@ def test_out_of_scope_not_enqueued(ctx):
             "VALUES ('other-lib', '', 1)"
         )
     assert _post(client, token, {"data": {"asset": _ASSET}}).status_code == 200
-    assert len(_job_params(db)) == 0
-    assert len(_events(db, "asset_out_of_scope")) == 1
+    assert _job_params(db) == [{"asset_id": "asset-1", "source": "webhook"}]
+
+
+def test_webhook_does_not_send_an_excluded_image_to_the_model(tmp_path):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from fastapi import FastAPI
+
+    from app.engine.executor import run_job
+    from app.store.jobs import claim_next
+    from app.web.routes.hooks import router
+
+    db = Database(tmp_path / "test.db")
+    migrate(db)
+    with db.connect() as conn:
+        conn.execute("INSERT INTO exclusions(type,value) VALUES ('path','/private')")
+
+    app = FastAPI()
+    app.state.db = db
+    app.include_router(router)
+    with TestClient(app) as client:
+        assert _post(client, SettingsStore(db).webhook_token(), {"assetId": "sample"}).status_code == 200
+
+    immich = Mock()
+    immich.get_asset.return_value = SimpleNamespace(
+        type_="IMAGE", original_path="/private/receipt.jpg", library_id=None,
+    )
+    model = Mock()
+    run_job(db, immich, model, claim_next(db))
+
+    immich.get_asset.assert_called_once_with("sample")
+    immich.fetch_thumbnail_bytes.assert_not_called()
+    model.chat.assert_not_called()
+    assert any(json.loads(event["payload"]).get("reason") == "path"
+               for event in _events(db, "asset_skipped"))
 
 
 def test_in_scope_by_library(ctx):
@@ -302,8 +328,21 @@ def test_webhook_disabled_logs_but_does_not_enqueue(ctx):
     assert len(_events(db, "webhook_disabled")) == 1
 
 
-def test_raw_payload_always_logged(ctx):
-    """无论能否解析，原始 payload 都落 events。"""
+def test_disabled_webhook_does_not_fallback_to_scan(ctx):
+    client, token, db = ctx
+    SettingsStore(db).set("webhook_enabled", False)
+    assert _post(client, token, b"not json").status_code == 200
+    assert _scan_count(db) == 0
+
+
+def test_webhook_does_not_store_image_metadata(ctx):
+    client, token, db = ctx
+    assert _post(client, token, {"asset": _ASSET}).status_code == 200
+    assert "IMG_2043.HEIC" not in _events(db, "payload_received")[0]["payload"]
+    assert "asset_hint" not in _job_params(db)[0]
+
+
+def test_payload_summary_logged_for_parse_success_and_failure(ctx):
     client, token, db = ctx
     _post(client, token, {"data": {"asset": _ASSET}})
     _post(client, token, b"garbage")
@@ -317,7 +356,7 @@ def test_raw_payload_always_logged(ctx):
 def test_webhook_does_not_block_loop_on_slow_db(tmp_path, monkeypatch):
     """webhook 处理路径中的同步慢调用不得饿死事件循环。
 
-    把 _has_active_single 换成 sleep 0.3s 的慢函数；同环 ASGI 驱动
+    把 enqueue_auto_job 换成 sleep 0.3s 的慢函数；同环 ASGI 驱动
     webhook POST，并发 tick 协程。若 immich_hook 的同步段在事件循环
     线程直接执行，tick 在处理期间完全无法推进。
     """
@@ -333,14 +372,13 @@ def test_webhook_does_not_block_loop_on_slow_db(tmp_path, monkeypatch):
     SettingsStore(db).set("poll_enabled", False)
     token = SettingsStore(db).webhook_token()
 
-    orig = hooks_mod._has_active_single
+    orig = hooks_mod.enqueue_auto_job
 
-    def slow_has_active_single(db, asset_id):
+    def slow_enqueue_auto_job(db, type_, params, **kwargs):
         time.sleep(0.3)
-        return orig(db, asset_id)
+        return orig(db, type_, params, **kwargs)
 
-    monkeypatch.setattr(hooks_mod, "_has_active_single",
-                        slow_has_active_single)
+    monkeypatch.setattr(hooks_mod, "enqueue_auto_job", slow_enqueue_auto_job)
 
     async def run():
         scope = {

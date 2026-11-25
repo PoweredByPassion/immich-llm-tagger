@@ -5,6 +5,7 @@ name: Publish Docker image
 #   - push 形如 v1.2.3 的 tag        → 覆盖 :1.2.3 / :1.2 / :latest
 #   - 手动触发（Actions 页面 Run workflow）
 on:
+  pull_request:
   push:
     branches: [main, master]
     tags: ['v*']
@@ -17,7 +18,42 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  verify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Build generated client and styles, then run tests
+        run: |
+          python -m pip install -e '.[dev]'
+          make generate css PYTHON=python
+          python -m pytest
+      - name: Verify live updates in Chromium
+        run: |
+          python -m pip install playwright==1.64.0
+          python -m playwright install --with-deps chromium
+          python -m tests.browser_live
+      - uses: docker/setup-buildx-action@v3
+      - name: Build and start the image
+        run: |
+          docker buildx build --load --tag tagger-ci .
+          docker run --init --detach --name tagger-ci --publish 127.0.0.1::8080 tagger-ci
+          trap 'docker logs tagger-ci; docker rm -f tagger-ci' EXIT
+          address=$(docker port tagger-ci 8080/tcp)
+          curl --fail --silent --show-error --retry 12 --retry-all-errors --retry-delay 1 \
+            "http://$address/api/health"
+          curl --fail --silent --show-error --output /tmp/tagger.css "http://$address/static/tailwind.css"
+          test -s /tmp/tagger.css
+          test "$(docker exec tagger-ci id -u)" = 10001
+
   build-and-push:
+    needs: verify
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -30,6 +66,11 @@ jobs:
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
+
+      - name: Set up arm64 emulation
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
@@ -54,6 +95,7 @@ jobs:
         with:
           context: .
           push: true
+          platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # Dockerfile 用了 BuildKit 的 --mount=type=cache，这里用 gha 缓存

@@ -82,6 +82,9 @@ class TestInScope:
         rules = [rule(path_prefix="/foo")]
         assert in_scope(rules, library_id=None, path="/foobar/x.jpg") is False
 
+    def test_absolute_path_rule_accepts_trailing_separator(self):
+        assert in_scope([rule(path_prefix="/foo/")], library_id=None, path="/foo/bar.jpg")
+
     def test_or_semantics_when_both_set(self):
         rules = [rule(library_id="lib-1", path_prefix="/foo")]
         assert in_scope(rules, library_id="lib-1", path="/other") is True
@@ -96,6 +99,31 @@ class TestInScope:
         rules = [rule(library_id="lib-1")]
         assert in_scope(rules, library_id=None, path=None) is False
 
+
+def test_auto_eligibility_uses_canonical_asset_and_path_exclusion(db):
+    from app.classify.scope import check_auto_eligibility
+
+    item = asset(uuid.UUID(int=1), "lib-1", "/private/a.jpg")
+    item.type_ = "IMAGE"
+    client = FakeDetailClient([], {str(item.id): item})
+    with db.connect() as conn:
+        conn.execute("INSERT INTO exclusions(type,value) VALUES ('path','/private')")
+
+    allowed, reason, details = check_auto_eligibility(client, db, str(item.id))
+
+    assert (allowed, reason, details) == (False, "path", item)
+
+
+def test_auto_eligibility_rejects_canonical_video(db):
+    from app.classify.scope import check_auto_eligibility
+
+    item = asset(uuid.UUID(int=1), "lib-1", "/photos/a.mov")
+    item.type_ = "VIDEO"
+    client = FakeDetailClient([], {str(item.id): item})
+
+    allowed, reason, details = check_auto_eligibility(client, db, str(item.id))
+
+    assert (allowed, reason, details) == (False, "not_image", item)
 
 # ----------------------------------------------------------- load_scope_rules
 
@@ -161,23 +189,27 @@ class TestScanQueueAssets:
 # ------------------------------------------------------- exclusions (M5 Task 2)
 
 class FakeDetailClient(FakeClient):
-    """get_asset 返回带 tags 的资产详情（album 排除需要判断资产所在相册时，
-    用 get_asset 的 additional_properties['albums'] 或标签判定）。"""
+    """Asset details and album membership are distinct Immich requests."""
 
     def __init__(self, assets, details=None, tag_id="11111111-1111-1111-1111-000000000001"):
         super().__init__(assets, tag_id)
         self.details = details or {}
         self.get_asset_calls: list[str] = []
+        self.list_asset_albums_calls: list[str] = []
 
     def get_asset(self, asset_id):
         self.get_asset_calls.append(str(asset_id))
         return self.details[str(asset_id)]
 
+    def list_asset_albums(self, asset_id):
+        self.list_asset_albums_calls.append(str(asset_id))
+        return self.details[str(asset_id)].albums
+
 
 def detail(aid, tags=(), album_ids=()):
     d = asset(aid)
     d.tags = [SimpleNamespace(name=t) for t in tags]
-    d.additional_properties = {"albums": [{"id": a, "albumName": a} for a in album_ids]}
+    d.albums = [SimpleNamespace(album_name=name) for name in album_ids]
     return d
 
 
@@ -248,7 +280,7 @@ class TestExclusionFiltering:
         assert result == [str(a1)]
         assert client.get_asset_calls == []
 
-    def test_album_exclusion_via_get_asset(self, db):
+    def test_album_exclusion_via_declared_album_lookup(self, db):
         a1, a2 = uuid.UUID(int=1), uuid.UUID(int=2)
         client = FakeDetailClient(
             [asset(a1, "lib-1", "/p/a.jpg"), asset(a2, "lib-1", "/p/b.jpg")],
@@ -261,7 +293,8 @@ class TestExclusionFiltering:
                 "INSERT INTO exclusions (type, value, enabled) VALUES ('album','旅行',1)")
         result = scan_queue_assets(client, db, "未分类", [])
         assert result == [str(a2)]
-        assert set(client.get_asset_calls) == {str(a1), str(a2)}
+        assert set(client.list_asset_albums_calls) == {str(a1), str(a2)}
+        assert client.get_asset_calls == []
 
     def test_tag_exclusion_via_get_asset(self, db):
         a1, a2 = uuid.UUID(int=1), uuid.UUID(int=2)

@@ -102,6 +102,21 @@ def test_import_roundtrip_equivalent_and_remap(db: Database) -> None:
     assert SettingsStore(db).get("poll_interval_seconds") == 42
 
 
+def test_round_trip_preserves_the_active_prompt_when_a_newer_draft_exists(db: Database) -> None:
+    from app.engine.executor import build_pipeline_config
+    from app.store.crud import create_prompt_version
+
+    with db.connect() as conn:
+        conn.execute("INSERT INTO tags(name,kind) VALUES ('other','primary')")
+    active = create_prompt_version(db, body="Active {{TAG_LIST}}")
+    create_prompt_version(db, body="Draft {{TAG_LIST}}")
+    SettingsStore(db).set_active_prompt_version(active)
+
+    import_config(db, export_config(db))
+
+    assert build_pipeline_config(db).prompt_template == "Active {{TAG_LIST}}"
+
+
 def test_import_preserves_secrets_and_nulls_active_prompt(db: Database) -> None:
     _seed(db)
     data = export_config(db)
@@ -202,7 +217,7 @@ def test_shipped_configs_are_importable_and_skip_rating_when_archived(
                 assert tag["write_rating"] is False, (name, tag["name"])
             else:
                 assert tag["write_rating"] is True, (name, tag["name"])
-            assert tag["write_description"] is True, (name, tag["name"])
+            assert tag["write_description"] == (tag["name"] not in {"证件", "id_document"})
 
         # 导入一整套（含 prompt 版本 / marker 规则 / settings）不报错
         fresh = Database(tmp_path / f"{name}.db")
