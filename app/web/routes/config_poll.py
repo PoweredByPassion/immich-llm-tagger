@@ -44,6 +44,7 @@ def _render(request: Request, settings: SettingsStore, **extra):
         "enabled_effects": settings.get("enabled_effects"),
         "skip_marker_tag_name": settings.get("skip_marker_tag_name") or "",
         "apply_max_attempts": settings.get("apply_max_attempts"),
+        "undo_retention_days": settings.get("undo_retention_days"),
         "effect_rows": _effect_rows(lang_from_cookie(request.cookies)),
         **extra,
     }
@@ -83,6 +84,7 @@ async def poll_save(request: Request):
     enabled_effects = list(form.getlist("enabled_effects"))
     skip_marker_tag_name = str(form.get("skip_marker_tag_name", "")).strip()
     raw_attempts = str(form.get("apply_max_attempts", "")).strip()
+    raw_undo_days = str(form.get("undo_retention_days", "")).strip()
     attempts: int | None = None
     if raw_attempts:
         try:
@@ -94,6 +96,9 @@ async def poll_save(request: Request):
                 request, settings,
                 error=t("config.effects.max_attempts_invalid", lang),
             )
+    if raw_undo_days and (not raw_undo_days.isascii() or not raw_undo_days.isdigit()
+                          or len(raw_undo_days) > 5):
+        return _render(request, settings, error=t("config.poll.undo_retention_invalid", lang))
     settings.set("poll_enabled", form.get("poll_enabled") is not None)
     settings.set("poll_interval_seconds", interval)
     settings.set("queue_tag_name", queue_tag_name)
@@ -101,4 +106,6 @@ async def poll_save(request: Request):
     settings.set("skip_marker_tag_name", skip_marker_tag_name or None)
     if attempts is not None:
         settings.set("apply_max_attempts", attempts)
+    if raw_undo_days:
+        settings.set("undo_retention_days", int(raw_undo_days))
     return _render(request, settings, saved=True)

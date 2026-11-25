@@ -48,3 +48,13 @@ def tail_events(db: Database, limit: int = 100) -> list[dict[str, Any]]:
             (limit,),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def job_change_conflicts(db: Database, job_id: int, limit: int = 100) -> list[dict[str, Any]]:
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT payload FROM events WHERE event_type IN ('undo_change_skipped','reset_change_skipped') "
+            "AND CASE WHEN json_valid(payload) THEN json_extract(payload, '$.job_id') END = ? "
+            "ORDER BY id DESC LIMIT ?", (job_id, limit),
+        ).fetchall()
+    return [json.loads(row["payload"]) for row in rows]

@@ -11,7 +11,9 @@ worker 并发进来之前，migrate() 已单线程完成切换。
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
+import fcntl
+import threading
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import replace
 from pathlib import Path
 
@@ -30,13 +32,43 @@ from app.store.seed import seed_from_env
 from app.store.settings import SettingsStore
 from app.web import auth, i18n
 from app.web.i18n import lang_from_cookie, t
-from app.web.routes import config_conn, config_poll, config_prompt, config_tags, health, hooks, jobs_ui, overview, usage_ui
+from app.web.routes import (
+    assets_ui,
+    config_conn,
+    config_exclusions,
+    config_markers,
+    config_poll,
+    config_prompt,
+    config_scope,
+    config_tags,
+    config_transfer,
+    config_webhook,
+    danger_ui,
+    health,
+    hooks,
+    jobs_ui,
+    overview,
+    usage_ui,
+)
 
 _TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 # worker 数固定（spec：分类并发 = 5），不再读 llm_conn.concurrency。
 DEFAULT_WORKER_SIZE = 5
+
+
+@contextmanager
+def _exclusive_data_dir(db_path: Path):
+    """Hold a process-wide database owner lock until workers have stopped."""
+    lock_path = db_path.resolve().with_suffix(".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a") as lock_file:
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError(f"The data directory is already in use: {lock_path.parent}") from exc
+        yield
 
 
 def create_app(
@@ -50,23 +82,19 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        with _exclusive_data_dir(bootstrap.db_path):
+            async with _run_services(app):
+                yield
+
+    @asynccontextmanager
+    async def _run_services(app: FastAPI):
         db = Database(bootstrap.db_path)
         migrate(db)
         seed_from_env(db, bootstrap)
         app.state.db = db
         app.state.bootstrap = bootstrap
 
-        # 孤儿 job 恢复：上次进程退出时 running 的 job 已无 worker 承载，
-        # 不恢复会永久卡住轮询调度（has_active_job_of_type 恒真）。
-        # 先清掉孤儿 classify_item 子任务（worker 尚未启动，此刻任何子任务都是
-        # 孤儿；父 scan 会被重新入队并重拆，从根上消除重复子任务），再重新入队
-        # running job——顺序不可颠倒。重新入队而非标记失败：scan 的 _already_done
-        # 会自动跳过已完成的资产，重跑只补剩余的（详见 store/jobs.py docstring）。
-        dropped = jobs.drop_orphan_children(db)
-        resumed = jobs.requeue_orphan_running_jobs(db)
-        if dropped:
-            events.log_event(db, "system", "orphan_children_dropped",
-                             {"count": dropped})
+        resumed, coordinators = jobs.recover_jobs(db)
         if resumed:
             events.log_event(db, "system", "jobs_resumed", {
                 "job_ids": resumed,
@@ -74,42 +102,54 @@ def create_app(
                 "reason": "进程重启时任务中断，已重新入队续跑",
             })
 
+        coordinator_stop = threading.Event()
+        coordinator_threads: list[threading.Thread] = []
+        coordinator_lock = threading.Lock()
+
         def _scan_coordinator_spawner(parent_job_id: int) -> None:
-            # 协调器线程不占 worker 池线程（spec：分类并发 = worker 数）。
-            # 它在 scan 拆分成功后被调用；resumed 的 scan 会在 worker 重跑该
-            # scan 时触发（on_scan_split），不在这里起（否则只会空转返回）。
             from app.engine.executor import start_scan_coordinator
-            start_scan_coordinator(bootstrap.db_path, parent_job_id)
+            with coordinator_lock:
+                coordinator_threads[:] = [thread for thread in coordinator_threads if thread.is_alive()]
+                coordinator_threads.append(start_scan_coordinator(
+                    bootstrap.db_path, parent_job_id, stop_event=coordinator_stop,
+                ))
 
         pool = WorkerPool(bootstrap.db_path, size=DEFAULT_WORKER_SIZE,
                           on_scan_split=_scan_coordinator_spawner)
-        pool.start()
 
-        def enqueue_scan() -> None:
-            # 独立 Database 实例（连接不可跨线程复用，scheduler 线程内自建）
-            jobs.create_job(Database(bootstrap.db_path), "scan",
-                            params={"source": "poll"})
+        def enqueue_scan() -> bool:
+            return jobs.enqueue_scan(db, {"source": "poll"}, enabled_setting="poll_enabled")[1]
+
+        def poll_enabled() -> bool:
+            settings = SettingsStore(db).get_all()
+            return bool(settings["poll_enabled"] and not settings["llm_paused_reason"])
 
         scheduler = PollScheduler(
             bootstrap.db_path,
             enqueue_scan,
             interval_getter=lambda: int(SettingsStore(db).get("poll_interval_seconds")),
-            enabled_getter=lambda: bool(SettingsStore(db).get("poll_enabled")),
+            enabled_getter=poll_enabled,
         )
-        scheduler.start()
-        # 启动时触发一次 retention 清理（maybe_purge 自管理 24h 间隔）
-        try:
-            scheduler.maybe_purge()
-        except Exception:
-            pass  # 清理失败不阻塞启动
-
         app.state.pool = pool
         app.state.scheduler = scheduler
+        app.state.asset_clients = assets_ui.AssetClients()
+
+        def stop_services() -> None:
+            scheduler.stop()
+            coordinator_stop.set()
+            pool.stop()
+            for thread in coordinator_threads:
+                thread.join()
+            app.state.asset_clients.close()
+
         try:
+            for parent_id in coordinators:
+                _scan_coordinator_spawner(parent_id)
+            pool.start()
+            scheduler.start()
             yield
         finally:
-            scheduler.stop()
-            pool.stop()
+            await asyncio.to_thread(stop_services)
 
     app = FastAPI(lifespan=lifespan)
     app.state.templates = Jinja2Templates(directory=_TEMPLATES_DIR)
@@ -118,14 +158,14 @@ def create_app(
 
     def _job_duration(job) -> str:
         """列表页耗时列：started_at → finished_at（无 finished 显示运行中）。"""
-        from datetime import datetime
+        from datetime import UTC, datetime
 
         def _ts(s):
-            return datetime.strptime(s, "%Y-%m-%d %H:%M:%S") if s else None
+            return datetime.strptime(s, "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC) if s else None
         started = _ts(job.started_at)
         if started is None:
             return "-"
-        end = _ts(job.finished_at) or datetime.utcnow()
+        end = _ts(job.finished_at) or datetime.now(UTC)
         return f"{max((end - started).total_seconds(), 0.0):.0f}s"
 
     app.state.templates.env.globals["job_duration"] = _job_duration
@@ -159,15 +199,6 @@ def create_app(
     app.include_router(config_prompt.router)
     app.include_router(jobs_ui.router)
     app.include_router(jobs_ui.sse_router)
-    from app.web.routes import (
-        assets_ui,
-        config_exclusions,
-        config_markers,
-        config_scope,
-        config_transfer,
-        config_webhook,
-        danger_ui,
-    )
     app.include_router(config_scope.router)
     app.include_router(config_exclusions.router)
     app.include_router(config_markers.router)

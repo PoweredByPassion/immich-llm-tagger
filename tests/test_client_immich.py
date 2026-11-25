@@ -488,7 +488,7 @@ def test_delete_tag_500_raises() -> None:
     assert e.value.status_code == 500
 
 
-def test_iter_assets_overall_timeout_returns_collected(monkeypatch, caplog) -> None:
+def test_iter_assets_overall_timeout_reports_resume_page(monkeypatch) -> None:
     """翻页整体超 ITER_TIME_LIMIT 后记 warning 并停止，返回已收集部分，不抛异常。"""
     clock = [0.0]
     monkeypatch.setattr(immich_module.time, "monotonic", lambda: clock[0])
@@ -502,10 +502,8 @@ def test_iter_assets_overall_timeout_returns_collected(monkeypatch, caplog) -> N
         clock[0] += 1000.0  # 第二页检查时已"耗尽"时限
         return httpx.Response(200, json=pages[body["page"]])
 
-    with caplog.at_level("WARNING", logger="app.clients.immich"):
-        ids = [
-            str(a.id)[-1]
-            for a in _client(handler).iter_assets(MetadataSearchDto(), size=1)
-        ]
-    assert ids == ["1"]
-    assert any("超时" in r.message for r in caplog.records)
+    assets = _client(handler).iter_assets(MetadataSearchDto(), size=1)
+    assert str(next(assets).id).endswith("1")
+    with pytest.raises(immich_module.ImmichScanIncomplete) as caught:
+        next(assets)
+    assert caught.value.next_page == 2

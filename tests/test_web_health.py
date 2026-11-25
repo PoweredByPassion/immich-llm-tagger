@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 
 from app.config import BootstrapConfig
 from app.db.connection import Database
+from app.db.migrate import _discover
 from app.web.app import create_app
 
 
@@ -32,7 +33,9 @@ def test_health_full_payload(data_dir: Path):
         resp = client.get("/api/health")
     assert resp.status_code == 200
     # 整体断言：三个键齐全、值正确，而不是逐字段抽查
-    assert resp.json() == {"status": "ok", "schema_version": 12, "db_writable": True}
+    assert resp.json() == {
+        "status": "ok", "schema_version": _discover()[-1][0], "db_writable": True,
+    }
 
 
 def test_migrations_ran_and_db_file_exists(data_dir: Path):
@@ -45,20 +48,30 @@ def test_migrations_ran_and_db_file_exists(data_dir: Path):
         (v,) = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()
     finally:
         conn.close()
-    assert v == 12
+    assert v == _discover()[-1][0]
 
 
 def test_health_reports_false_when_db_unusable(data_dir: Path, monkeypatch):
     def boom(self):
         raise sqlite3.OperationalError("database is locked")
-        yield  # pragma: no cover
 
     with _client(data_dir) as client:
         # 启动后再破坏 DB —— 只考验 health 端点，不影响 lifespan
         monkeypatch.setattr(Database, "connect", boom)
         resp = client.get("/api/health")
-    assert resp.status_code == 200
-    assert resp.json() == {"status": "ok", "schema_version": 0, "db_writable": False}
+        live = client.get("/api/live")
+    assert resp.status_code == 503
+    assert resp.json() == {"status": "unavailable", "schema_version": 0, "db_writable": False}
+    assert live.status_code == 200
+
+
+def test_health_does_not_write_probe_data(data_dir: Path):
+    with _client(data_dir) as client:
+        assert client.get("/api/health").status_code == 200
+        with client.app.state.db.connect() as conn:
+            assert conn.execute(
+                "SELECT name FROM sqlite_master WHERE name = 'health_probe'"
+            ).fetchone() is None
 
 
 def test_root_renders_overview(data_dir: Path):

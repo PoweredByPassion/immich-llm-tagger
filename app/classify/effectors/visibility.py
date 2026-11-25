@@ -9,11 +9,11 @@ def plan(ctx: EffectContext, last_written: dict, has_system_archive: bool = Fals
         return []
     current = ctx.snapshot.visibility
     if ctx.archive:
-        if current == "archive":
+        if current not in (None, "timeline"):
             return []
         return [Effect("archive", ctx.asset_id, {"from_visibility": current or "timeline"})]
     if has_system_archive:
-        if current == "timeline":
+        if current != "archive":
             return []
         return [Effect("timeline", ctx.asset_id, {"from_visibility": current or "archive"})]
     return []

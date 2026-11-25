@@ -15,7 +15,7 @@ from typing import Any
 
 try:  # pragma: no cover - 生成客户端在 make generate 后才存在
     from app.clients._immich_gen.types import Unset
-except Exception:  # pragma: no cover
+except ImportError:  # pragma: no cover
     class Unset:  # type: ignore[no-redef]
         pass
 
@@ -25,10 +25,9 @@ def _val(x: Any) -> Any:
     return None if isinstance(x, Unset) else x
 
 
-def _blank_to_none(x: Any) -> str | None:
-    if isinstance(x, str) and x.strip():
-        return x.strip()
-    return None
+def _description_value(value: Any) -> str | None:
+    """Keep literal text so ownership checks also notice whitespace edits."""
+    return value if isinstance(value, str) and value else None
 
 
 @dataclass(frozen=True)
@@ -37,29 +36,32 @@ class AssetSnapshot:
     description: str | None = None
     visibility: str | None = None
     tags: tuple[str, ...] = ()
+    tag_ids: tuple[tuple[str, str], ...] = ()
 
     @classmethod
-    def from_dto(cls, dto: Any) -> "AssetSnapshot":
+    def from_dto(cls, dto: Any) -> AssetSnapshot:
         exif = getattr(dto, "exif_info", None)
         rating = _val(getattr(exif, "rating", None)) if exif is not None else None
         desc = _val(getattr(exif, "description", None)) if exif is not None else None
         tags = getattr(dto, "tags", None) or []
         return cls(
             rating=rating if isinstance(rating, int) else None,
-            description=_blank_to_none(desc),
+            description=_description_value(desc),
             visibility=_vis_str(_val(getattr(dto, "visibility", None))),
             tags=tuple(str(getattr(t, "name", t)) for t in tags),
+            tag_ids=tuple((tag.name, str(tag_id)) for tag in tags
+                          if (tag_id := _val(getattr(tag, "id", None))) is not None),
         )
 
     @classmethod
-    def from_hint(cls, hint: dict) -> "AssetSnapshot":
+    def from_hint(cls, hint: dict) -> AssetSnapshot:
         exif = hint.get("exifInfo") if isinstance(hint, dict) else None
         exif = exif if isinstance(exif, dict) else {}
         rating = exif.get("rating")
         tags = hint.get("tags") or [] if isinstance(hint, dict) else []
         return cls(
             rating=rating if isinstance(rating, int) else None,
-            description=_blank_to_none(exif.get("description")),
+            description=_description_value(exif.get("description")),
             visibility=None,   # `_HINT_FIELDS` 不含 visibility（hooks.py:40）
             tags=tuple(str(t.get("name", t) if isinstance(t, dict) else t) for t in tags),
         )

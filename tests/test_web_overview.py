@@ -38,7 +38,6 @@ def client(tmp_path: Path):
         c.app.state.scheduler.stop()
         SettingsStore(c.app.state.db).set("poll_enabled", False)
         # 兜底：把竞态窗口内已入队的 job 清掉
-        import sqlite3
         with c.app.state.db.connect() as conn:
             conn.execute("DELETE FROM jobs")
         yield c
@@ -53,10 +52,11 @@ def _collect_sse_frames(
     msgs: list[dict] = []
 
     async def run() -> list[dict]:
+        path_only, _, query = path.partition("?")
         scope = {
-            "type": "http", "http_version": "1.1", "method": "GET", "path": path,
-            "raw_path": path.encode(), "root_path": "", "scheme": "http",
-            "query_string": b"", "headers": [(b"host", b"test")],
+            "type": "http", "http_version": "1.1", "method": "GET", "path": path_only,
+            "raw_path": path_only.encode(), "root_path": "", "scheme": "http",
+            "query_string": query.encode(), "headers": [(b"host", b"test")],
             "client": ("testclient", 0), "server": ("testserver", 80), "state": {},
         }
 
@@ -66,19 +66,6 @@ def _collect_sse_frames(
         async def send(message: dict) -> None:
             msgs.append(message)
 
-        got_startup = asyncio.Event()
-
-        async def lifespan_send(message: dict) -> None:
-            if message["type"] == "lifespan.startup.complete":
-                got_startup.set()
-
-        async def lifespan_receive() -> dict:
-            return {"type": "lifespan.startup"}
-
-        lifespan_task = asyncio.ensure_future(
-            app({"type": "lifespan", "state": {}}, lifespan_receive, lifespan_send)
-        )
-        await asyncio.wait_for(got_startup.wait(), 5)
         task = asyncio.ensure_future(app(scope, receive, send))
         t0 = time.monotonic()
         try:
@@ -89,12 +76,10 @@ def _collect_sse_frames(
                     break
         finally:
             task.cancel()
-            lifespan_task.cancel()
-            for t in (task, lifespan_task):
-                try:
-                    await t
-                except BaseException:
-                    pass
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
         return msgs
 
     return asyncio.run(run())
@@ -126,30 +111,15 @@ def _sse_frame_count_with_timing(
             if message["type"] == "http.response.body":
                 count += 1
 
-        got_startup = asyncio.Event()
-
-        async def lifespan_send(message: dict) -> None:
-            if message["type"] == "lifespan.startup.complete":
-                got_startup.set()
-
-        async def lifespan_receive() -> dict:
-            return {"type": "lifespan.startup"}
-
-        lifespan_task = asyncio.ensure_future(
-            app({"type": "lifespan", "state": {}}, lifespan_receive, lifespan_send)
-        )
-        await asyncio.wait_for(got_startup.wait(), 5)
         task = asyncio.ensure_future(app(scope, receive, send))
         try:
             await asyncio.sleep(window_seconds)
         finally:
             task.cancel()
-            lifespan_task.cancel()
-            for t in (task, lifespan_task):
-                try:
-                    await t
-                except BaseException:
-                    pass
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
         return count
 
     return asyncio.run(run())
@@ -165,7 +135,7 @@ def test_index_renders_overview(client):
     for fragment in (
         "队列深度", "今日处理", "归档", "运行中任务", "最近任务",
         "轮询模式" if poll_enabled else "仅 Webhook 触发",
-        "tabular-nums", "hx-ext=\"sse\"", 'sse-connect="/api/sse/overview"',
+        "tabular-nums", "hx-ext=\"sse\"", 'sse-connect="/api/sse/overview?view=html"',
     ):
         assert fragment in text, fragment
 
@@ -191,6 +161,36 @@ def test_sse_content_type(client):
     assert start[0]["status"] == 200
     headers = dict(start[0]["headers"])
     assert headers[b"content-type"].startswith(b"text/event-stream")
+
+
+def test_overview_browser_subscribes_to_named_html_updates(client):
+    page = client.get("/").text
+    assert 'sse-connect="/api/sse/overview?view=html"' in page
+    assert 'sse-swap="overview"' in page
+    msgs = _collect_sse_frames(client.app, "/api/sse/overview?view=html", n_frames=1)
+    frame = _sse_bodies(msgs)[0]
+    assert frame.startswith(b"event: overview\n")
+    assert b"data-overview-processed" in frame
+
+
+def test_overview_counts_applied_and_failed_production_assets_only(client):
+    from app.store.queries import overview
+
+    db = client.app.state.db
+    with db.connect() as conn:
+        conn.execute(
+            """INSERT INTO asset_records
+               (asset_id, source, status, apply_status, dry_run, applied_at)
+               VALUES ('done', 'manual', 'ok', 'applied', 0, datetime('now')),
+                      ('pending', 'manual', 'ok', 'pending', 0, NULL),
+                      ('failed-apply', 'manual', 'ok', 'failed', 0, NULL),
+                      ('failed-model', 'manual', 'error', NULL, 0, NULL),
+                      ('sandbox-ok', 'manual', 'ok', NULL, 1, NULL),
+                      ('sandbox-fail', 'manual', 'error', NULL, 1, NULL)"""
+        )
+    data = overview(db, "UTC")
+    assert data["processed_today"] == 1
+    assert data["failed_today"] == 2
 
 
 def test_sse_frames_json_fields(client):
@@ -268,6 +268,9 @@ class _FakeImmichClient:
     def __init__(self, **kwargs: Any) -> None:
         self.kwargs = kwargs
 
+    def close(self) -> None:
+        pass
+
     def statistics(self) -> Any:
         return SimpleNamespace(
             images=_FAKE_STATS["images"],
@@ -286,7 +289,7 @@ def _force_immich_refresh(monkeypatch: pytest.MonkeyPatch) -> Any:
     """清空模块级缓存，迫使下一次 payload 计算真的走一次刷新路径。"""
     from app.web.routes import overview as overview_module
     monkeypatch.setattr(
-        overview_module, "_immich_overview_cache", (float("-inf"), None)
+        overview_module, "_immich_overview_cache", None
     )
     return overview_module
 
@@ -415,7 +418,7 @@ def test_sse_slow_fetch_does_not_starve_loop(client, monkeypatch):
             time.sleep(0.3)
             return []
 
-    monkeypatch.setattr(ov, "_immich_overview_cache", (float("-inf"), None))
+    monkeypatch.setattr(ov, "_immich_overview_cache", None)
     monkeypatch.setattr(ov, "ImmichClient", _SlowImmich)
     from app.store.connections import ConnectionStore, ImmichConn
     ConnectionStore(client.app.state.db).set_immich(
@@ -449,28 +452,14 @@ def test_sse_slow_fetch_does_not_starve_loop(client, monkeypatch):
                 await asyncio.sleep(0.02)
                 progress.append(1)
 
-        got_startup = asyncio.Event()
-
-        async def lifespan_send(message):
-            if message["type"] == "lifespan.startup.complete":
-                got_startup.set()
-
-        async def lifespan_receive():
-            return {"type": "lifespan.startup"}
-
-        app = client.app
-        lifespan_task = asyncio.ensure_future(
-            app({"type": "lifespan", "state": {}},
-                lifespan_receive, lifespan_send)
-        )
-        await asyncio.wait_for(got_startup.wait(), 5)
-        task = asyncio.ensure_future(app(scope, receive, send))
+        task = asyncio.ensure_future(client.app(scope, receive, send))
         tick_task = asyncio.ensure_future(tick())
         try:
             await asyncio.wait_for(first_body.wait(), 5)
         finally:
-            task.cancel(); tick_task.cancel(); lifespan_task.cancel()
-            for t in (task, tick_task, lifespan_task):
+            task.cancel()
+            tick_task.cancel()
+            for t in (task, tick_task):
                 try:
                     await t
                 except BaseException:
@@ -491,7 +480,7 @@ def test_overview_queue_depth_excludes_classify_item(client):
 
     db = client.app.state.db
     scan = create_job(db, "scan", {})
-    jobs.finish_job(db, scan)          # 父 scan 已完成
+    assert jobs.claim_next(db).id == scan
     # 一个 running 的子任务，专门验证运行列表过滤
     running_child = create_job(db, "classify_item",
                                {"asset_id": "r", "parent_job_id": scan})
@@ -503,6 +492,6 @@ def test_overview_queue_depth_excludes_classify_item(client):
 
     data = overview(db)
     assert data["queued_jobs"] == 0    # 5 个 queued 子任务不计入
-    assert data["running_jobs"] == 0   # 1 个 running 子任务不计入
-    assert data["running"] == []
+    assert data["running_jobs"] == 1   # 只计父任务
+    assert [row["id"] for row in data["running"]] == [scan]
 

@@ -16,6 +16,10 @@ DEFAULTS: dict[str, Any] = {
     "queue_tag_name": "未分类",
     "webhook_enabled": True,
     "webhook_token": None,          # None → 首次访问时生成
+    "llm_paused_reason": None,
+    "allow_cloud_images": False,
+    "retain_model_payloads": False,
+    "sensitive_marker_tag_name": "sensitive",
     "poll_enabled": True,
     "poll_interval_seconds": 300,
     "default_min_confidence": 0.8,
@@ -23,6 +27,7 @@ DEFAULTS: dict[str, Any] = {
     "thumb_preset": "large",
     "thumb_quality": 95,
     "record_retention_days": 90,
+    "undo_retention_days": 365,
     "last_retention_run": None,     # epoch 秒（float），retention 24h 自管理时间戳
     "active_prompt_version_id": None,
     # --- Effector 开关与重试（§8.1）---
@@ -42,9 +47,11 @@ class SettingsStore:
     def __init__(self, db: Database) -> None:
         self._db = db
 
-    def _raw(self) -> dict[str, Any]:
-        with self._db.connect() as conn:
-            rows = conn.execute("SELECT key, value FROM settings").fetchall()
+    def _raw(self, conn=None) -> dict[str, Any]:
+        if conn is None:
+            with self._db.connect() as opened:
+                return self._raw(opened)
+        rows = conn.execute("SELECT key, value FROM settings").fetchall()
         out: dict[str, Any] = {}
         for row in rows:
             out[row["key"]] = json.loads(row["value"])
@@ -56,8 +63,8 @@ class SettingsStore:
         stored = self._raw()
         return copy.deepcopy(stored.get(key, DEFAULTS[key]))
 
-    def get_all(self) -> dict[str, Any]:
-        return copy.deepcopy({**DEFAULTS, **self._raw()})
+    def get_all(self, conn=None) -> dict[str, Any]:
+        return copy.deepcopy({**DEFAULTS, **self._raw(conn)})
 
     def set(self, key: str, value: Any) -> None:
         if key not in DEFAULTS:

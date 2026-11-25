@@ -26,13 +26,15 @@ class TagDef:
     write_description: bool = True
 
 
-def load_tags(db: Database) -> list[TagDef]:
-    with db.connect() as conn:
-        rows = conn.execute(
+def load_tags(db: Database, conn=None) -> list[TagDef]:
+    if conn is None:
+        with db.connect() as opened:
+            return load_tags(db, opened)
+    rows = conn.execute(
             "SELECT id, name, description, kind, enabled, archive, album, "
             "       min_confidence, skip_immich, write_rating, write_description "
             "  FROM tags ORDER BY id"
-        ).fetchall()
+    ).fetchall()
     return [
         TagDef(
             id=row["id"],

@@ -1,5 +1,6 @@
 import json
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -19,7 +20,7 @@ def db(tmp_path: Path) -> Database:
 # ---------- 失败模式 8：迁移 ----------
 
 def test_fresh_db_migrates_to_latest(db: Database) -> None:
-    assert current_version(db) == 12
+    assert current_version(db) == 14
     with db.connect() as conn:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(jobs)")}
     assert "cancel_requested" in cols
@@ -49,7 +50,7 @@ def test_old_v1_db_upgraded_to_v2_on_startup(tmp_path: Path) -> None:
     assert "cancel_requested" not in cols
 
     migrate(database)
-    assert current_version(database) == 12
+    assert current_version(database) == 14
     with database.connect() as conn:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(jobs)")}
     assert "cancel_requested" in cols
@@ -80,48 +81,130 @@ def test_two_claims_only_one_wins(db: Database) -> None:
     assert second is None
 
 
-def test_claim_loses_race_between_select_and_update(tmp_path: Path) -> None:
-    """确定性竞争注入：claim_next 的 SELECT 之后、UPDATE 之前，
-    job 被另一个 worker 抢走。有 status 守卫 + rowcount 校验的 claim_next
-    必须返回 None，而不是把别人已抢到的 job 再返回一次。"""
-    from contextlib import contextmanager
+def test_auto_sources_atomically_share_one_active_asset_job(db: Database) -> None:
+    parent_id = jobs.create_job(db, "scan", {})
 
-    path = tmp_path / "race.db"
-    db = Database(path)
-    migrate(db)
-    jobs.create_job(db, "scan", {})
+    def enqueue(i):
+        type_ = "single" if i % 2 else "classify_item"
+        return jobs.enqueue_auto_job(db, type_, {
+            "asset_id": "same", "parent_job_id": parent_id,
+            "source": "webhook" if i % 2 else "poll",
+        })
 
-    class Racy(Database):
-        """在 claim_next 的候选 SELECT 命中后，用同一连接把该 job
-        置为 running —— 模拟并发窗口内被抢占。"""
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        submitted = list(pool.map(enqueue, range(16)))
+    assert len({job_id for job_id, _ in submitted}) == 1
+    assert sum(created for _, created in submitted) == 1
 
-        def connect(self):  # type: ignore[override]
-            outer = self
 
-            @contextmanager
-            def cm():
-                with Database.connect(outer) as real:
-                    class Proxy:
-                        def execute(self, sql, *a):
-                            r = real.execute(sql, *a)
-                            if "SELECT id FROM jobs" in sql:
-                                real.execute(
-                                    "UPDATE jobs SET status = 'running', "
-                                    "started_at = datetime('now') WHERE id = ("
-                                    "SELECT id FROM jobs WHERE status = 'queued' LIMIT 1)"
-                                )
-                            return r
+def test_reset_excludes_new_job_claims_and_direct_mutations(db: Database) -> None:
+    with jobs.asset_mutation(db), pytest.raises(jobs.JobsActive):
+        jobs.enqueue_reset(db, {"dimensions": ["tag"]})
 
-                        def __getattr__(self, name):
-                            return getattr(real, name)
+    reset_id = jobs.enqueue_reset(db, {"dimensions": ["tag"]})
+    scan_id, _ = jobs.enqueue_scan(db, {"source": "manual"})
+    with pytest.raises(jobs.ResetInProgress), jobs.asset_mutation(db):
+        pytest.fail("direct mutation started during reset")
+    assert jobs.claim_next(db).id == reset_id
+    assert jobs.claim_next(db) is None
+    jobs.finish_job(db, reset_id)
+    assert jobs.claim_next(db).id == scan_id
 
-                    yield Proxy()
 
-            return cm()
+def test_reset_waits_for_persisted_pending_asset_writes(db: Database) -> None:
+    with db.connect() as conn:
+        conn.execute("INSERT INTO asset_state(asset_id,process_status) VALUES ('a','pending')")
+        conn.execute("INSERT INTO pending_effects(asset_id,batches) VALUES ('a','[]')")
+    with pytest.raises(jobs.JobsActive):
+        jobs.enqueue_reset(db, {"dimensions": ["tag"]})
 
-    assert jobs.claim_next(Racy(path)) is None
-    # job 最终只被抢占一次，状态正确
-    assert jobs.get_job(db, 1).status == "running"
+    with db.connect() as conn:
+        conn.execute("UPDATE asset_state SET process_status='failed' WHERE asset_id='a'")
+    assert jobs.enqueue_reset(db, {"dimensions": ["tag"]}) > 0
+
+
+def test_recovery_preserves_eligible_children_and_honors_canceled_jobs(db: Database) -> None:
+    parent = jobs.create_job(db, "scan", {})
+    assert jobs.claim_next(db).id == parent
+    child = jobs.create_job(db, "classify_item", {"asset_id": "a", "parent_job_id": parent})
+    assert jobs.claim_next(db).id == child
+    canceled = jobs.create_job(db, "single", {"asset_id": "b"})
+    assert jobs.claim_next(db).id == canceled
+    assert jobs.cancel_job(db, canceled)
+    with db.connect() as conn:
+        conn.execute("UPDATE jobs SET discovery_complete=1 WHERE id=?", (parent,))
+
+    resumed, coordinators = jobs.recover_jobs(db)
+
+    assert resumed == [child]
+    assert coordinators == [parent]
+    assert jobs.get_job(db, canceled).status == "canceled"
+    assert jobs.get_job(db, parent).status == "running"
+    assert jobs.claim_next(db).id == child
+
+
+def test_recovery_finishes_backfill_after_committed_final_page(db: Database) -> None:
+    backfill = jobs.create_job(db, "backfill", {})
+    assert jobs.claim_next(db).id == backfill
+    with db.connect() as conn:
+        conn.execute("UPDATE jobs SET discovery_complete=1, total=10, done=10 WHERE id=?", (backfill,))
+
+    assert jobs.recover_jobs(db) == ([], [])
+    assert jobs.get_job(db, backfill).status == "done"
+    assert jobs.get_job(db, backfill).done == 10
+
+
+def test_checkpoint_defers_children_until_discovery_can_no_longer_shift(db: Database) -> None:
+    parent = jobs.create_job(db, "scan", {})
+    assert jobs.claim_next(db).id == parent
+    assert jobs.enqueue_scan_items(
+        db, parent, ["a", "a"], "poll", next_page=2, next_cursor="resume-here",
+        defer_until_discovered=True,
+    ) == 1
+    assert jobs.get_job(db, parent).scan_page == 2
+    assert jobs.get_job(db, parent).scan_cursor == "resume-here"
+    assert jobs.get_job(db, parent).total == 1
+    assert jobs.claim_next(db) is None
+
+    assert jobs.enqueue_scan_items(
+        db, parent, ["a"], "poll", defer_until_discovered=True, complete_discovery=True,
+    ) == 0
+    assert jobs.get_job(db, parent).discovery_complete
+    assert jobs.get_job(db, parent).scan_cursor is None
+    assert jobs.claim_next(db).params["asset_id"] == "a"
+
+
+def test_finishing_a_scan_child_updates_parent_progress_once(db: Database) -> None:
+    parent = jobs.create_job(db, "scan", {})
+    assert jobs.claim_next(db).id == parent
+    assert jobs.enqueue_scan_items(db, parent, ["a"], "poll") == 1
+    child = jobs.claim_next(db).id
+
+    jobs.finish_scan_item(db, child, parent)
+    jobs.finish_scan_item(db, child, parent, error="duplicate completion")
+
+    assert jobs.get_job(db, child).status == "done"
+    assert (jobs.get_job(db, parent).done, jobs.get_job(db, parent).failed) == (1, 0)
+
+
+def test_paused_discovery_can_resume_after_other_ready_work(db: Database) -> None:
+    parent = jobs.create_job(db, "scan", {})
+    assert jobs.claim_next(db).id == parent
+    jobs.defer_discovery(db, parent, delay_seconds=15)
+    assert jobs.claim_next(db) is None
+    other = jobs.create_job(db, "single", {"asset_id": "a"})
+    assert jobs.claim_next(db).id == other
+    with db.connect() as conn:
+        conn.execute("UPDATE jobs SET available_at=datetime('now','-1 second') WHERE id=?", (parent,))
+    assert jobs.claim_next(db).id == parent
+
+
+def test_concurrent_workers_cannot_claim_the_same_job(db: Database) -> None:
+    job_id = jobs.create_job(db, "scan", {})
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        claimed = list(pool.map(jobs.claim_next, [db] * 5))
+    assert [row.id for row in claimed if row is not None] == [job_id]
+    assert jobs.get_job(db, job_id).status == "running"
 
 
 def test_claim_fifo_by_id(db: Database) -> None:
@@ -171,10 +254,10 @@ def test_cancel_running_job_only_sets_flag(db: Database) -> None:
     row = jobs.get_job(db, jid)
     assert row.status == "running"
     assert jobs.is_canceled(db, jid) is True
-    # worker 照常 finish，自然变 done
+    # Worker completes its current action before finalizing cancellation.
     jobs.finish_job(db, jid)
     row = jobs.get_job(db, jid)
-    assert row.status == "done"
+    assert row.status == "canceled"
 
 
 def test_cancel_terminal_job_returns_false(db: Database) -> None:
@@ -315,8 +398,8 @@ def test_requeue_orphan_running_jobs_puts_back_to_queued(db: Database) -> None:
     with db.connect() as conn:
         conn.execute("UPDATE jobs SET status='running', started_at="
                      "datetime('now'), done=685, total=722, "
-                     "cancel_requested=1 WHERE id=?", (stuck,))
-    assert jobs.requeue_orphan_running_jobs(db) == [stuck]
+                     "cancel_requested=0 WHERE id=?", (stuck,))
+    assert jobs.recover_jobs(db) == ([stuck], [])
     row = jobs.get_job(db, stuck)
     assert row.status == "queued"
     # 进度保留（续跑的基线），时间戳与取消标志清掉
@@ -331,29 +414,11 @@ def test_requeue_orphan_running_jobs_puts_back_to_queued(db: Database) -> None:
     assert jobs.get_job(db, queued).status == "queued"
 
 
-def test_requeue_orphan_running_jobs_is_idempotent_per_process(
-    db: Database,
-) -> None:
-    """进程级单次守卫：同库二次调用不再改写（测试里二次驱动 lifespan
-    会把中途构造的 running job 误改）。"""
-    stuck = jobs.create_job(db, "scan", {})
-    with db.connect() as conn:
-        conn.execute("UPDATE jobs SET status='running' WHERE id=?", (stuck,))
-    assert jobs.requeue_orphan_running_jobs(db) == [stuck]
-    # 守卫生效：再造一个 running job 也不该被这次调用波及
-    other = jobs.create_job(db, "scan", {})
-    with db.connect() as conn:
-        conn.execute("UPDATE jobs SET status='running' WHERE id=?", (other,))
-    assert jobs.requeue_orphan_running_jobs(db) == []
-    assert jobs.get_job(db, other).status == "running"
-    assert jobs.get_job(db, stuck).status == "queued"
-
-
-def test_requeue_orphan_running_jobs_no_running_returns_empty(
+def test_recovery_with_no_running_jobs_returns_empty(
     db: Database,
 ) -> None:
     jobs.create_job(db, "scan", {})
-    assert jobs.requeue_orphan_running_jobs(db) == []
+    assert jobs.recover_jobs(db) == ([], [])
     assert jobs.get_job(db, 1).status == "queued"
 
 
@@ -362,7 +427,7 @@ def test_requeued_job_is_claimable_again(db: Database) -> None:
     stuck = jobs.create_job(db, "scan", {})
     with db.connect() as conn:
         conn.execute("UPDATE jobs SET status='running' WHERE id=?", (stuck,))
-    jobs.requeue_orphan_running_jobs(db)
+    jobs.recover_jobs(db)
     claimed = jobs.claim_next(db)
     assert claimed is not None and claimed.id == stuck
     assert claimed.status == "running"
@@ -370,11 +435,11 @@ def test_requeued_job_is_claimable_again(db: Database) -> None:
     assert jobs.claim_next(db) is None
 
 
-def test_requeue_orphan_running_jobs_returns_ids_ordered(db: Database) -> None:
+def test_recovery_returns_ids_ordered(db: Database) -> None:
     ids = [jobs.create_job(db, "scan", {}) for _ in range(3)]
     with db.connect() as conn:
         conn.execute("UPDATE jobs SET status='running'")
-    assert jobs.requeue_orphan_running_jobs(db) == ids
+    assert jobs.recover_jobs(db) == (ids, [])
 
 
 # ---------- 优化批次 Part A：子任务（classify_item）机制 ----------
@@ -425,20 +490,17 @@ def test_pending_children_and_cancel(db: Database) -> None:
     assert jobs.pending_children(db, pid) == 0
 
 
-def test_drop_orphan_children_cancels_queued_and_running(db: Database) -> None:
-    """启动恢复：所有非终态 classify_item 都是孤儿（worker 尚未启动），
-    直接置 canceled——父 scan 会被 requeue 重拆，从根上消除重复。"""
+def test_recovery_cancels_queued_and_running_children_of_canceled_parent(db: Database) -> None:
     pid = jobs.create_job(db, "scan", {})
-    jobs.create_job(db, "classify_item",
-                    {"asset_id": "a", "parent_job_id": pid})       # queued
+    queued = jobs.create_job(db, "classify_item", {"asset_id": "a", "parent_job_id": pid})
     with db.connect() as conn:                                    # running（手工造）
-        conn.execute(
+        running = conn.execute(
             "INSERT INTO jobs (type, status, params) VALUES "
             "('classify_item', 'running', ?)",
             (json.dumps({"asset_id": "b", "parent_job_id": pid}),),
-        )
-    dropped = jobs.drop_orphan_children(db)
-    assert dropped == 2
+        ).lastrowid
+    assert jobs.cancel_job(db, pid)
+    assert jobs.recover_jobs(db) == ([], [])
+    assert jobs.get_job(db, queued).status == "canceled"
+    assert jobs.get_job(db, running).status == "canceled"
     assert jobs.pending_children(db, pid) == 0
-    # per-DB-path 单次守卫：二次调用不再改写（测试/热重载会重复驱动 lifespan）
-    assert jobs.drop_orphan_children(db) == 0

@@ -120,6 +120,15 @@ def _change_logs(db, asset_id: str = ASSET_ID) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def _record_managed_tags(db, *names: str) -> None:
+    with db.connect() as conn:
+        conn.executemany(
+            "INSERT INTO change_log (asset_id, action, direction, payload) "
+            "VALUES (?, 'tag_add', 'apply', ?)",
+            [(ASSET_ID, json.dumps({"tag_name": name})) for name in names],
+        )
+
+
 def _events(db, event_type: str) -> list[dict]:
     with db.connect() as conn:
         rows = conn.execute(
@@ -169,6 +178,49 @@ def test_mark_reviewed_logs_event(db):
 # ------------------------------------------------------------- apply_override
 
 
+def test_apply_override_does_not_claim_an_existing_personal_label(db):
+    _insert_tag(db, "人像", "primary")
+    client = FakeClient(asset_tags=[_Tag("人像", "t1")])
+
+    apply_override(db, client, ASSET_ID, "人像")
+
+    assert client.tag_assets_calls == []
+    assert _change_logs(db) == []
+
+
+def test_next_override_reconciles_a_confirmed_write_after_journal_failure(db):
+    import sqlite3
+
+    from app.clients.immich import ImmichError
+
+    _insert_tag(db, "人像", "primary")
+    client = FakeClient()
+    tag_assets = client.tag_assets
+
+    def persist_tag_on_immich(tag_ids, asset_ids):
+        tag_assets(tag_ids, asset_ids)
+        client.asset.tags.append(_Tag("人像", tag_ids[0]))
+
+    client.tag_assets = persist_tag_on_immich
+    with db.connect() as conn:
+        conn.execute(
+            "CREATE TRIGGER fail_override_journal BEFORE INSERT ON change_log "
+            "WHEN NEW.action='tag_add' BEGIN SELECT RAISE(ABORT, 'disk failure'); END"
+        )
+    with pytest.raises((ImmichError, sqlite3.IntegrityError), match="disk failure"):
+        apply_override(db, client, ASSET_ID, "人像")
+    with db.connect() as conn:
+        conn.execute("DROP TRIGGER fail_override_journal")
+
+    apply_override(db, client, ASSET_ID, "人像")
+
+    assert len(client.tag_assets_calls) == 1
+    entries = [json.loads(row["payload"]) for row in _change_logs(db)]
+    assert [p["tag_id"] for p in entries] == ["tag-id-人像", "tag-id-人像"]
+    assert entries[-1]["protected"] is True
+    assert _state(db)["manual_override"]
+
+
 def test_apply_override_removes_only_owned_managed_tags(db):
     """摘旧只摘实际拥有的；tags 表里的其他标签、用户手打标签都不动。"""
     _insert_tag(db, "风景", "primary")
@@ -177,6 +229,7 @@ def test_apply_override_removes_only_owned_managed_tags(db):
     _insert_state(
         db, ASSET_ID, current_tag="风景", current_markers=json.dumps(["天空"])
     )
+    _record_managed_tags(db, "风景", "天空")
     client = FakeClient(
         asset_tags=[_Tag("风景", "t1"), _Tag("用户的", "t2"), _Tag("人像", "t3")]
     )
@@ -192,6 +245,7 @@ def test_apply_override_ignores_history_records(db):
     （过期的marker 刻意留在 tags 表外：若误用历史会摘掉 t9。）"""
     _insert_tag(db, "风景", "primary")
     _insert_state(db, ASSET_ID, current_tag="风景", current_markers="[]")
+    _record_managed_tags(db, "风景")
     _insert_record(db, ASSET_ID, markers=json.dumps(["过期的marker"]))
     client = FakeClient(asset_tags=[_Tag("风景", "t1"), _Tag("过期的marker", "t9")])
     apply_override(db, client, ASSET_ID, "人像")
@@ -199,8 +253,8 @@ def test_apply_override_ignores_history_records(db):
     assert untagged == {"t1"}
 
 
-def test_apply_override_removes_state_markers_even_if_tag_deleted(db):
-    """asset_state 当前值里的标签即使已从 tags 表删除也摘（§5.8 条件2）。"""
+def test_apply_override_removes_managed_markers_even_if_rule_deleted(db):
+    _record_managed_tags(db, "风景", "天空")
     _insert_tag(db, "风景", "primary")
     _insert_state(db, ASSET_ID, current_tag="风景", current_markers='["天空"]')
     client = FakeClient(asset_tags=[_Tag("风景", "t1"), _Tag("天空", "t2")])
@@ -212,13 +266,14 @@ def test_apply_override_tags_new_and_writes_changelog_null_job(db):
     _insert_tag(db, "人像", "primary")
     _insert_tag(db, "天空", "marker")
     _insert_state(db, ASSET_ID, current_tag="风景")
+    _record_managed_tags(db, "风景")
     client = FakeClient(asset_tags=[_Tag("风景", "t1")])
     apply_override(db, client, ASSET_ID, "人像", marker_tags=["天空"])
     assert client.ensure_tags_calls[-1] == ["人像", "天空"]
-    assert client.tag_assets_calls == [(["tag-id-人像", "tag-id-天空"], [ASSET_ID])]
+    assert client.tag_assets_calls == [(["tag-id-人像"], [ASSET_ID]), (["tag-id-天空"], [ASSET_ID])]
     logs = _change_logs(db)
     removes = [l for l in logs if l["action"] == "tag_remove"]
-    adds = [l for l in logs if l["action"] == "tag_add"]
+    adds = [l for l in logs if l["action"] == "tag_add" and "tag_id" in json.loads(l["payload"])]
     assert [json.loads(l["payload"])["tag_name"] for l in removes] == ["风景"]
     assert {json.loads(l["payload"])["tag_name"] for l in adds} == {"人像", "天空"}
     for l in logs:

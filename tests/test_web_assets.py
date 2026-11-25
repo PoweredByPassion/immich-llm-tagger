@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-import sqlite3
 from pathlib import Path
 
 import pytest
@@ -306,7 +305,14 @@ class _FakeClient:
     def __init__(self, *, base_url, api_key, verify_ssl, timeout, **kw):
         assert timeout == 30.0 or timeout > 0
         self.base_url = base_url
-        assets_ui_module._fake_instances.append(self)
+        _FakeClient.instances.append(self)
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+    def open(self):
+        pass
 
     def get_asset(self, asset_id):
         if _FakeClient.asset is None:
@@ -325,7 +331,7 @@ class _FakeClient:
         cls.thumb_error = None
         cls.thumbnail = b"\xff\xd8\xff\xe0THUMB-JPEG"
         cls.sizes = []
-        assets_ui_module._fake_instances = []
+        cls.instances = []
 
 
 @pytest.fixture()
@@ -416,7 +422,25 @@ def test_sync_no_asset_state(client, mock_client):
     assert resp.status_code == 200
     assert "暂无记录" in resp.text
     # 未发起 Immich 调用
-    assert assets_ui_module._fake_instances == []
+    assert mock_client.instances == []
+
+
+def test_reset_blocks_direct_asset_state_changes(client, mock_client):
+    from app.store import jobs
+
+    c, db = client
+    _insert_state(db, ASSET_ID, manual_override=1)
+    reset = jobs.create_job(db, "reset", {"dimensions": ["tag"]})
+    assert jobs.claim_next(db).id == reset
+    for suffix in ("sync", "review", "override/clear"):
+        response = c.post(f"/assets/{ASSET_ID}/{suffix}")
+        assert "重置正在等待或执行" in response.text
+    with db.connect() as conn:
+        state = conn.execute(
+            "SELECT manual_override, reviewed FROM asset_state WHERE asset_id = ?", (ASSET_ID,)
+        ).fetchone()
+    assert tuple(state) == (1, 0)
+    assert mock_client.instances == []
 
 
 def test_sync_timeout_propagates_as_error(client, mock_client, monkeypatch):
@@ -470,12 +494,19 @@ class _OverrideClient:
     """manual.py 的 Immich 替身（web 层）：记录 untag/tag 调用即可。"""
 
     def __init__(self, *, base_url, api_key, verify_ssl, timeout, **kw):
-        assets_ui_module._fake_instances.append(self)
+        pass
+
+    def close(self):
+        pass
+
+    def open(self):
+        pass
 
     def get_asset(self, asset_id):
         class _T:
             def __init__(self, name):
                 self.name = name
+                self.id = f"id-{name}"
 
         class _A:
             tags = [_T("风景")]
@@ -583,6 +614,12 @@ def test_post_override_applies(client, override_client):
     _insert_tag(db, "人像", "primary")
     _insert_tag(db, "天空", "marker")
     _insert_tag(db, "风景", "primary")  # _OverrideClient 的 asset 上有"风景"
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO change_log (asset_id, action, direction, payload) "
+            "VALUES (?, 'tag_add', 'apply', ?)",
+            (ASSET_ID, json.dumps({"tag_name": "风景", "tag_id": "id-风景"})),
+        )
     resp = c.post(
         f"/assets/{ASSET_ID}/override",
         data={"tag": "人像", "markers": ["天空"]},
@@ -694,7 +731,26 @@ def test_thumb_returns_jpeg_bytes(client, mock_client):
     assert resp.status_code == 200
     assert resp.headers["content-type"] == "image/jpeg"
     assert resp.content == b"\xff\xd8\xff\xe0RAW-JPEG-BYTES"
-    assert assets_ui_module._fake_instances  # 确实构造了客户端
+    assert mock_client.instances  # 确实构造了客户端
+
+
+def test_thumbnail_clients_reused_replaced_and_closed(data_dir, mock_client):
+    with _build_client(data_dir) as client:
+        store = ConnectionStore(client.app.state.db)
+        store.set_immich(ImmichConn(url="http://immich.example", api_key="k"))
+        for _ in range(3):
+            assert client.get(f"/assets/{ASSET_ID}/thumb").status_code == 200
+        assert len(mock_client.instances) == 1
+        first = mock_client.instances[0]
+        assert not first.closed
+
+        store.set_immich(ImmichConn(url="http://other.example", api_key="k"))
+        assert client.get(f"/assets/{ASSET_ID}/preview").status_code == 200
+        assert len(mock_client.instances) == 2
+        assert first.closed
+        assert not mock_client.instances[-1].closed
+
+    assert mock_client.instances[-1].closed
 
 
 def test_thumb_immich_error_returns_404(client, mock_client):
@@ -712,7 +768,7 @@ def test_thumb_no_connection_returns_404(client, mock_client):
     resp = c.get(f"/assets/{ASSET_ID}/thumb")
     assert resp.status_code == 404
     # 未配置连接时不构造客户端
-    assert assets_ui_module._fake_instances == []
+    assert mock_client.instances == []
 
 
 def test_list_renders_created_at_and_thumb_img(client):
@@ -802,7 +858,7 @@ def test_preview_no_connection_returns_404(client, mock_client):
     c, _ = client
     resp = c.get(f"/assets/{ASSET_ID}/preview")
     assert resp.status_code == 404
-    assert assets_ui_module._fake_instances == []
+    assert mock_client.instances == []
 
 
 def test_list_renders_lightbox_hooks(client):

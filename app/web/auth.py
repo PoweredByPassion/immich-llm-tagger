@@ -19,7 +19,7 @@ _SALT = os.urandom(32)
 
 # 未登录也放行的路径。登录页 / 健康探针用**精确**匹配：前缀匹配会连带放行
 # 未来的 /login-help、/api/health/detail 之类路由（静默裸奔）。
-EXEMPT_EXACT = ("/login", "/static", "/api/health")
+EXEMPT_EXACT = ("/login", "/static", "/api/health", "/api/live")
 # 仅对真正的「前缀形」挂载点做前缀匹配（末尾带 /）。webhook 自带 token 校验。
 EXEMPT_PREFIXES = ("/static/", "/api/hooks/")
 # 这些前缀下的未登录请求返回 401 JSON，而不是 302 重定向——JSON/SSE 调用方

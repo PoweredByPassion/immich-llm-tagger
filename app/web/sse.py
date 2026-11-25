@@ -1,22 +1,14 @@
-"""SSE 基础设施：可复用的轮询式 async generator。
-
-SQLite 连接不可跨线程/协程复用（见 app/db/connection.py）——
-每轮快照查询都新建短命 Database（沿用 app.state.db 的 path）。
-
-用法：
-    async def stream(request):
-        db: Database = request.app.state.db
-        return EventSourceResponse(
-            sse_stream(lambda: queries.overview(Database(db.path)), 1.0)
-        )
-"""
+"""Polling streams for JSON clients and htmx HTML fragments."""
 from __future__ import annotations
 
 import asyncio
 import json
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from fastapi.responses import StreamingResponse
+
+_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 
 
 def _frame(payload: dict) -> str:
@@ -24,25 +16,51 @@ def _frame(payload: dict) -> str:
 
 
 async def poll_stream(fetch: Callable[[], dict], interval: float = 1.0):
-    """每 interval 秒调用 fetch() 取快照，yield SSE 帧。
-
-    fetch 经 asyncio.to_thread 跑在线程池：fetch 可能含同步网络 I/O
-    （overview 缓存过期时的 Immich 调用，timeout 最长 120s），直接在
-    事件循环里调会饿死所有并发协程（PERF-1）。
-    GeneratorExit / CancelledError 时干净退出，不产生 error 日志。
-    """
-    try:
-        while True:
-            yield _frame(await asyncio.to_thread(fetch))
-            await asyncio.sleep(interval)
-    except (GeneratorExit, asyncio.CancelledError):
-        raise
+    """Run synchronous snapshot reads outside the event loop."""
+    while True:
+        yield _frame(await asyncio.to_thread(fetch))
+        await asyncio.sleep(interval)
 
 
 def sse_response(fetch: Callable[[], dict], interval: float = 1.0) -> StreamingResponse:
-    """把 poll_stream 包成 text/event-stream 响应。"""
     return StreamingResponse(
-        poll_stream(fetch, interval),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        poll_stream(fetch, interval), media_type="text/event-stream", headers=_HEADERS,
     )
+
+
+@dataclass(frozen=True)
+class HtmlEvent:
+    name: str
+    content: str
+    final: bool = False
+
+    def frame(self) -> str:
+        lines = [f"event: {self.name}"]
+        content = self.content.replace("\r\n", "\n").replace("\r", "\n")
+        lines.extend(f"data: {line}" for line in content.split("\n"))
+        return "\n".join(lines) + "\n\n"
+
+
+def html_sse_response[T](
+    fetch: Callable[[], T], render: Callable[[T], HtmlEvent],
+    interval: float = 1.0,
+) -> StreamingResponse:
+    async def stream():
+        previous = object()
+        loop = asyncio.get_running_loop()
+        last_sent = loop.time()
+        while True:
+            payload = await asyncio.to_thread(fetch)
+            if payload != previous:
+                event = await asyncio.to_thread(render, payload)
+                yield event.frame()
+                if event.final:
+                    return
+                previous = payload
+                last_sent = loop.time()
+            elif loop.time() - last_sent >= 15:
+                yield ": keepalive\n\n"
+                last_sent = loop.time()
+            await asyncio.sleep(interval)
+
+    return StreamingResponse(stream(), media_type="text/event-stream", headers=_HEADERS)

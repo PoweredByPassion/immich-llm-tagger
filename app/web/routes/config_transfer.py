@@ -29,7 +29,6 @@ _SKIPPED_SENSITIVE_KEYS = [
     "config.transfer.sensitive.immich_key",
     "config.transfer.sensitive.llm_key",
     "config.transfer.sensitive.webhook_token",
-    "config.transfer.sensitive.active_prompt",
 ]
 
 

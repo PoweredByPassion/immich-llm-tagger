@@ -45,8 +45,6 @@ class _FakeClient:
 @pytest.fixture()
 def mock_immich(monkeypatch):
     monkeypatch.setattr(
-        "app.classify.reset_ops._load_tag_defs", lambda db: [])
-    monkeypatch.setattr(
         danger_ui, "ImmichClient", lambda **kw: _FakeClient())
     return _FakeClient
 

@@ -65,13 +65,14 @@ def test_scheduler_reads_poll_settings(data_dir: Path):
 # ------------------------------------------------- 孤儿 job 恢复（685/722 卡死回归）
 
 
-def test_lifespan_requeues_orphan_running_jobs(data_dir: Path):
+def test_lifespan_requeues_orphan_running_jobs(data_dir: Path, monkeypatch):
     """线上 job #24 卡在 685/722 的回归：进程重启后 lifespan 必须把
     无人承载的 running job 重新入队，否则 has_active_job_of_type 恒真
     → 轮询永不触发 → 进度永远停在 685。"""
     from app.db.migrate import migrate
     from app.store import jobs
 
+    monkeypatch.setattr("app.engine.pool.WorkerPool.start", lambda self: None)
     db = Database(_bootstrap(data_dir).db_path)
     migrate(db)
     stuck = jobs.create_job(db, "scan", {"source": "manual"})
@@ -82,8 +83,7 @@ def test_lifespan_requeues_orphan_running_jobs(data_dir: Path):
     with TestClient(create_app(data_dir=data_dir, bootstrap=_bootstrap(data_dir))):
         live = Database(_bootstrap(data_dir).db_path)
         row = jobs.get_job(live, stuck)
-        # 要么已被 worker 重新 claim（running，进度保留），要么还在队列里等
-        assert row.status in ("queued", "running")
+        assert row.status == "queued"
         assert row.done == 685 and row.total == 722
         # 记了恢复事件
         from app.store import events
@@ -91,14 +91,7 @@ def test_lifespan_requeues_orphan_running_jobs(data_dir: Path):
                    for e in events.tail_events(live, limit=200))
 
 
-def test_lifespan_leaves_healthy_running_job_alone(data_dir: Path,
-                                                   monkeypatch):
-    """守卫回归：同一进程内二次驱动 lifespan 不能把正在跑的 job 抢走。
-
-    app2 不起 worker（patch 掉 pool.start），排除"恢复后又被立刻 claim"
-    的干扰，纯粹验证守卫生效。store 层的等价断言见
-    test_requeue_orphan_running_jobs_is_idempotent_per_process。
-    """
+def test_second_service_cannot_open_same_data_directory(data_dir: Path, monkeypatch):
     from app.db.migrate import migrate
     from app.store import jobs
 
@@ -113,12 +106,14 @@ def test_lifespan_leaves_healthy_running_job_alone(data_dir: Path,
             conn.execute("UPDATE jobs SET status='running', "
                          "started_at=datetime('now') WHERE id=?", (running,))
         before = jobs.get_job(live, running)
-        # 同进程再开一个 app：单次守卫生效，不动这个 job
-        with TestClient(create_app(data_dir=data_dir,
-                                   bootstrap=_bootstrap(data_dir))) as client2:
-            after = jobs.get_job(client2.app.state.db, running)
+        duplicate = create_app(data_dir=data_dir, bootstrap=_bootstrap(data_dir))
+        with pytest.raises(RuntimeError, match="data directory is already in use"), TestClient(duplicate):
+            pytest.fail("second service opened the same database")
+        after = jobs.get_job(live, running)
         assert after.status == "running", "job 被二次 lifespan 恢复了"
         assert after.started_at == before.started_at
+    with TestClient(create_app(data_dir=data_dir, bootstrap=_bootstrap(data_dir))):
+        assert jobs.get_job(live, running).status == "queued"
 
 
 # ------------------------------------------------------------- webhook

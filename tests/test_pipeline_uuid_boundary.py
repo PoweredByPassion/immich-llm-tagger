@@ -60,7 +60,7 @@ def test_uuid_asset_id_is_converted_to_str(monkeypatch):
                          _cfg(), source="manual")
     assert seen["asset_id"] == "f5848a69-49fa-424d-a9d9-4e4a9a99e52f"
     assert isinstance(seen["asset_id"], str)
-    assert res.status == "error"
+    assert res.status == "busy"
 
 
 def test_str_asset_id_unchanged(monkeypatch):

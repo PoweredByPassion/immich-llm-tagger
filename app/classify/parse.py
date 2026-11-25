@@ -117,6 +117,7 @@ def normalize(
     enabled_primary_tags: set[str],
     fallback_tag: str,
     marker_rules: list[tuple[str, dict]],
+    sensitive_marker: str = "sensitive",
 ) -> Classification:
     # 拒答 marker（配置中心 Marker 规则页的 on_refusal 规则）：模型没能给出
     # 可用判定时打上，让人在 Immich 里能一键筛出"识别失败"的图。
@@ -126,7 +127,7 @@ def normalize(
         return Classification(
             tag=fallback_tag, confidence=None, sensitive=True, reason=None,
             # 内置规则：拒答 → sensitive marker + 配置的拒答 marker
-            markers=_unique(("sensitive", *refusal_markers)),
+            markers=_unique((sensitive_marker, *refusal_markers)),
         )
 
     tag = fallback_tag
@@ -141,12 +142,12 @@ def normalize(
             if 0.0 <= c <= 1.0:
                 confidence = c
 
-    sensitive = bool(raw.get("sensitive")) if raw else False
+    sensitive = raw.get("sensitive") is True if raw else False
     reason = raw.get("reason") if raw and isinstance(raw.get("reason"), str) else None
 
     markers: list[str] = []
     if sensitive:
-        markers.append("sensitive")
+        markers.append(sensitive_marker)
     for name, cond in marker_rules:
         try:
             hit = "confidence_lt" in cond and confidence is not None and confidence < float(cond["confidence_lt"])

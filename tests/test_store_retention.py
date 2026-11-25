@@ -57,6 +57,54 @@ def test_old_terminal_job_purged(db: Database) -> None:
     assert jobs.get_job(db, old) is None
 
 
+def test_reversible_task_outlives_its_recognition_records(db: Database) -> None:
+    old = "2020-01-01 00:00:00"
+    job_id = _make_job(db, "done", finished_at=old)
+    SettingsStore(db).set("undo_retention_days", 0)
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO change_log(job_id,asset_id,action,direction) VALUES (?,'a','archive','apply')",
+            (job_id,),
+        )
+        conn.execute(
+            "INSERT INTO asset_records(job_id,asset_id,source,status,created_at) "
+            "VALUES (?,'a','poll','ok',?)", (job_id, old),
+        )
+
+    purge_expired(db)
+
+    assert _count(db, "jobs") == 1
+    assert _count(db, "asset_records") == 0
+
+
+def test_inverse_recovery_and_active_undo_keep_jobs_during_purge(db: Database) -> None:
+    old = "2020-01-01 00:00:00"
+    original = _make_job(db, "done", finished_at=old)
+    pending_inverse = _make_job(db, "failed", finished_at=old)
+    expired_inverse = _make_job(db, "done", finished_at=old)
+    jobs.create_job(db, "undo", {"target_job_id": original})
+    with db.connect() as conn:
+        source = conn.execute(
+            "INSERT INTO change_log (job_id,asset_id,action,direction) "
+            "VALUES (?,'a1','archive','apply')", (original,),
+        ).lastrowid
+        conn.execute(
+            "INSERT INTO inverse_steps VALUES (?,?,'a1','{}','{}','undo','pending')",
+            (pending_inverse, source),
+        )
+        conn.execute(
+            "INSERT INTO inverse_steps VALUES (?,?,'a1','{}','{}','undo','applied')",
+            (expired_inverse, source),
+        )
+
+    purge_expired(db)
+
+    assert jobs.get_job(db, original) is not None
+    assert jobs.get_job(db, pending_inverse) is not None
+    assert jobs.get_job(db, expired_inverse) is None
+    assert _count(db, "inverse_steps") == 1
+
+
 def test_old_asset_records_and_events_purged(db: Database) -> None:
     with db.connect() as conn:
         conn.execute(

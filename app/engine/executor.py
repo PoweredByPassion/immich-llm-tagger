@@ -16,12 +16,15 @@ queued 阶段被 `cancel_job` 直接置（那是入库层的事，executor 不�
 """
 from __future__ import annotations
 
+import json
 import threading
 import time
+from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
-from typing import Callable
 
-from app.classify.undo import UndoSession
+import httpx
+
 from app.classify.pipeline import (
     PipelineConfig,
     PipelineResult,
@@ -29,40 +32,24 @@ from app.classify.pipeline import (
 )
 from app.classify.reclassify import reclassify_asset
 from app.classify.scope import (
+    check_auto_eligibility,
     iter_scope_assets,
+    load_exclusions,
     load_scope_rules,
     scan_queue_assets,
 )
-from app.clients.immich import ImmichError
+from app.classify.undo import UndoSession
+from app.clients._immich_gen.models.asset_type_enum import AssetTypeEnum
+from app.clients._immich_gen.models.metadata_search_dto import MetadataSearchDto
+from app.clients.immich import ImmichError, ImmichScanIncomplete
 from app.db.connection import Database
 from app.store import events, jobs
+from app.store.assets import processing_complete
 from app.store.connections import ConnectionStore
-from app.store.settings import SettingsStore, resolve_skip_marker_tag_name
-from app.store.tags import load_tags
-
-# 内置默认模板；active_prompt_version_id
-# 为 None 时使用它。必须包含 MANDATORY_PLACEHOLDER（{{TAG_LIST}}）。
-DEFAULT_PROMPT_TEMPLATE = (
-    "You are a photo tagging assistant. Classify the screenshot into exactly "
-    "one tag from the list below.\n\n"
-    "Tags:\n{{TAG_LIST}}\n\n"
-    "File: {{FILENAME}}\n"
-    "Date: {{DATE}}\n\n"
-    "First describe what you actually see, then classify, then rate. "
-    'Respond with JSON: {"description": "<one sentence>", "tag": "<tag>", '
-    '"confidence": <0-1>, "sensitive": <bool>, "reason": "<short>", '
-    '"rating": <1-5>}\n'
-    '"rating" says how good the photo looks (composition, exposure, focus, '
-    "colour, light) - never how important, memorable or emotionally "
-    "significant the subject is; the filename and date are context only.\n"
-    "If none fits, use the fallback tag. Set "
-    '"sensitive" true for anything not safe to share publicly (nudity, '
-    "intimate or medical images, ID cards, passports, bank cards, passwords, "
-    "private chats, contact details, addresses, medical or financial records, "
-    "sensitive imagery of minors, gore, evidence of illegal activity); always "
-    "output the JSON object, never refuse, and keep explicit or intimate "
-    'details out of "description".'
-)
+from app.store.rules import DEFAULT_PROMPT_TEMPLATE as DEFAULT_PROMPT_TEMPLATE
+from app.store.rules import read_rule_snapshot
+from app.store.settings import SettingsStore
+from app.store.tags import TagDef
 
 # scan 拆分后的协调器：轮询子任务直到全部终态，再收尾父 scan。不占用 worker
 # 池线程（spec：分类并发 = worker 数）。
@@ -71,77 +58,41 @@ SCAN_COORDINATOR_TIMEOUT = 6 * 3600   # 协调器最长等待，防僵尸线程
 SCAN_COORD_ERROR_LOG_INTERVAL = 60.0  # 协调器错误日志节流（同 scheduler）
 
 
-def build_pipeline_config(db: Database) -> PipelineConfig:
-    """从 DB 读配置快照：settings + tags + prompt 模板 + llm conn。
-
-    tags 为空时 tag_list 空——渲染出的 prompt 无标签，LLM 会拒答或选
-    fallback，这是可接受的降级。
-    """
-    settings = SettingsStore(db)
-    conns = ConnectionStore(db)
-    tags = load_tags(db)
-
-    pv_id = settings.get("active_prompt_version_id")
-    template = DEFAULT_PROMPT_TEMPLATE
-    if pv_id is not None:
-        with db.connect() as conn:
-            row = conn.execute(
-                "SELECT body FROM prompt_versions WHERE id = ?", (pv_id,)
-            ).fetchone()
-        if row is not None:
-            template = row["body"]
-    else:
-        # 未激活任何版本时回退**最新版本**；表完全为空才用
-        # 内置 DEFAULT_PROMPT_TEMPLATE。
-        with db.connect() as conn:
-            row = conn.execute(
-                "SELECT body FROM prompt_versions "
-                "ORDER BY created_at DESC, id DESC LIMIT 1"
-            ).fetchone()
-        if row is not None:
-            template = row["body"]
-
-    marker_rules = _load_marker_rules(db)
-
-    return PipelineConfig(
-        prompt_template=template,
-        tags=tags,
-        marker_rules=marker_rules,
-        fallback_tag=settings.get("fallback_tag_name"),
-        default_min_confidence=settings.get("default_min_confidence"),
-        thumb=_thumb_config(settings),
-        queue_tag_name=settings.get("queue_tag_name"),
-        llm=conns.get_llm(),
-        concurrency_owner=_owner_id(db),
-        enabled_effects=frozenset(settings.get("enabled_effects")),
-        skip_marker_tag_name=resolve_skip_marker_tag_name(settings),
-        apply_max_attempts=int(settings.get("apply_max_attempts")),
-    )
-
-
-def _thumb_config(settings: SettingsStore):
+def build_pipeline_config(db: Database, job: jobs.JobRow | None = None) -> PipelineConfig:
+    """Use the queued rules and current connection credentials and privacy settings."""
     from app.classify.thumb import ThumbConfig
-    return ThumbConfig(preset=settings.get("thumb_preset"),
-                       quality=settings.get("thumb_quality"))
-
-
-def _load_marker_rules(db: Database) -> list[tuple[str, dict]]:
-    """marker_rules 表 → [(marker_tag_name, condition_dict)]。"""
-    import json
 
     with db.connect() as conn:
-        rows = conn.execute(
-            "SELECT t.name, r.condition FROM marker_rules r "
-            "JOIN tags t ON t.id = r.marker_tag_id "
-            "WHERE r.enabled = 1 ORDER BY r.id"
-        ).fetchall()
-    rules: list[tuple[str, dict]] = []
-    for name, cond in rows:
-        try:
-            rules.append((name, json.loads(cond)))
-        except (TypeError, ValueError):
-            continue
-    return rules
+        conn.execute("BEGIN")
+        snapshot = None
+        if job is not None:
+            snapshot_job = job.params["parent_job_id"] if job.type == "classify_item" else job.id
+            row = conn.execute("SELECT rule_snapshot FROM jobs WHERE id=?", (snapshot_job,)).fetchone()
+            if row and row["rule_snapshot"]:
+                snapshot = json.loads(row["rule_snapshot"])
+        if snapshot is None:
+            snapshot = read_rule_snapshot(conn)
+        current = SettingsStore(db).get_all(conn)
+        llm = ConnectionStore(db).get_llm(conn)
+
+    return PipelineConfig(
+        prompt_template=snapshot["prompt_template"],
+        prompt_version_id=snapshot["prompt_version_id"],
+        tags=[TagDef(**tag) for tag in snapshot["tags"]],
+        marker_rules=[tuple(rule) for rule in snapshot["marker_rules"]],
+        fallback_tag=snapshot["fallback_tag_name"],
+        default_min_confidence=snapshot["default_min_confidence"],
+        thumb=ThumbConfig(preset=snapshot["thumb_preset"], quality=snapshot["thumb_quality"]),
+        queue_tag_name=snapshot["queue_tag_name"],
+        llm=llm,
+        concurrency_owner=_owner_id(db),
+        enabled_effects=frozenset(snapshot["enabled_effects"]),
+        skip_marker_tag_name=snapshot["skip_marker_tag_name"] or "保留人工信息",
+        sensitive_marker_tag_name=snapshot["sensitive_marker_tag_name"],
+        apply_max_attempts=int(snapshot["apply_max_attempts"]),
+        allow_cloud_images=bool(current["allow_cloud_images"]),
+        retain_model_payloads=bool(current["retain_model_payloads"]),
+    )
 
 
 def _owner_id(db: Database | None = None) -> int:
@@ -156,7 +107,6 @@ def _owner_id(db: Database | None = None) -> int:
     import hashlib
     import os
     import socket
-    import threading
 
     raw = f"{socket.gethostname()}:{os.getpid()}:{threading.get_ident()}"
     return int.from_bytes(hashlib.sha256(raw.encode()).digest()[:4], "big")
@@ -190,21 +140,41 @@ def _run_single_job(db, client, llm, job, cfg) -> None:
     asset_id = params["asset_id"]
     source = params.get("source", "manual")
     dry_run = job.type == "dryrun" or bool(params.get("dry_run"))
+    with db.connect() as conn:
+        interrupted = conn.execute(
+            "SELECT status, apply_status FROM asset_records WHERE job_id=? AND asset_id=? ORDER BY id DESC LIMIT 1",
+            (job.id, asset_id),
+        ).fetchone()
+    if interrupted and interrupted["apply_status"] == "applied":
+        failed = interrupted["status"] == "error"
+        with db.connect() as conn:
+            conn.execute("UPDATE jobs SET total=1, done=?, failed=? WHERE id=?",
+                         (int(not failed), int(failed), job.id))
+        jobs.finish_job(db, job.id, error="Model output was invalid" if failed else None)
+        return
+    with db.connect() as conn:
+        conn.execute("UPDATE jobs SET total=1 WHERE id=?", (job.id,))
     # 沙盒试跑允许携带编辑框里的草稿模板（未保存版本也能试跑）
     if dry_run and params.get("prompt_body"):
-        from dataclasses import replace as _dc_replace
-        cfg = _dc_replace(cfg, prompt_template=str(params["prompt_body"]))
+        cfg = replace(cfg, prompt_template=str(params["prompt_body"]), prompt_version_id=None)
 
     _log_job_event(db, "job_started", job, asset_id=asset_id)
     result = classify_asset(
         db, client, llm, asset_id, cfg,
         source=source, dry_run=dry_run, job_id=job.id,
-        prompt_version_id=job.prompt_version_id,
+        prompt_version_id=cfg.prompt_version_id or job.prompt_version_id,
         asset_hint=params.get("asset_hint"),
+        auto_check=source in {"webhook", "poll"} and client is not None,
+        skip_completed=not dry_run and source in {"webhook", "poll"},
     )
-    jobs.incr_progress(db, job.id, failed=(result.status == "error"))
+    if result.status == "busy" and job.status == "running":
+        jobs.defer_discovery(db, job.id, delay_seconds=5)
+        return
+    with db.connect() as conn:
+        conn.execute("UPDATE jobs SET done=?, failed=? WHERE id=?",
+                     (int(not result.failed), int(result.failed), job.id))
     _record_result(db, job.id, result, result.dry_run)
-    jobs.finish_job(db, job.id)
+    jobs.finish_job(db, job.id, error=(result.apply_error or "Classification failed") if result.failed else None)
     _log_job_event(db, "job_complete", job, asset_id=asset_id)
 
 
@@ -212,12 +182,17 @@ def _record_result(db: Database, job_id: int, result: PipelineResult,
                    dry_run: bool) -> None:
     """按结果写 asset 事件（计数由调用方负责——需与 incr_progress 分离，
     才能保证「计数恰好一次」，见 run_classify_item 的 counted 守卫）。"""
-    if result.status == "ok":
+    if result.failed:
+        events.log_event(db, "system", "asset_apply_incomplete" if result.apply_status else "job_error", {
+            "job_id": job_id, "asset_id": result.asset_id, "status": result.apply_status,
+            "error": result.apply_error or "classification failed", "dry_run": dry_run,
+        })
+    elif result.status == "ok":
         events.log_event(db, "system", "asset_ingested", {
             "job_id": job_id, "asset_id": result.asset_id, "tag": result.tag,
             "confidence": result.confidence, "dry_run": dry_run,
         })
-    elif result.status == "refused":
+    elif result.status in ("refused", "busy", "skipped"):
         events.log_event(db, "system", "asset_skipped", {
             "job_id": job_id, "asset_id": result.asset_id,
             "markers": list(result.markers), "dry_run": dry_run,
@@ -235,7 +210,17 @@ def run_scan_job(db: Database, client, llm, job: jobs.JobRow,
     异常收敛为 finish_job(error)，父 job 失败即不产生子任务。"""
     try:
         _run_scan_job(db, client, llm, job, cfg_factory)
+    except ImmichScanIncomplete as exc:
+        _pause_discovery(db, job.id, str(exc))
+    except ImmichError as exc:
+        if hasattr(client, "iter_asset_pages") and _temporarily_unavailable(exc):
+            _pause_discovery(db, job.id, str(exc))
+        else:
+            jobs.cancel_children_of(db, job.id)
+            _log_job_event(db, "job_error", job, error=str(exc))
+            jobs.finish_job(db, job.id, error=str(exc))
     except Exception as exc:  # noqa: BLE001
+        jobs.cancel_children_of(db, job.id)
         _log_job_event(db, "job_error", job, error=str(exc))
         jobs.finish_job(db, job.id, error=str(exc))
 
@@ -250,6 +235,9 @@ def _run_scan_job(db: Database, client, llm, job: jobs.JobRow,
     rules = load_scope_rules(db)
     # cfg 快照：scan 开始时读一次，用于队列标签名与"已完成"自愈。
     cfg = cfg_factory()
+    if hasattr(client, "iter_asset_pages"):
+        _discover_queued_pages(db, client, job, cfg, rules)
+        return
     candidates = scan_queue_assets(client, db, cfg.queue_tag_name, rules)
 
     # total = 这个 job 累计要处理的总张数。定义见模块 docstring。
@@ -287,61 +275,90 @@ def _run_scan_job(db: Database, client, llm, job: jobs.JobRow,
                      {"job_id": job.id, "split": split})
 
 
+def _pause_discovery(db, job_id, reason):
+    jobs.defer_discovery(db, job_id)
+    events.log_event(db, "system", "scan_discovery_paused", {"job_id": job_id, "reason": reason})
+
+
+def _temporarily_unavailable(exc: ImmichError) -> bool:
+    status = exc.status_code
+    return (status in {408, 429} or (status is not None and status >= 500)
+            or isinstance(exc.__cause__, httpx.TransportError))
+
+
+def _discover_queued_pages(db, client, job, cfg, rules):
+    if jobs.is_canceled(db, job.id):
+        jobs.cancel_children_of(db, job.id)
+        jobs.finish_job(db, job.id)
+        return
+    tag_id = client.ensure_tags([cfg.queue_tag_name])[cfg.queue_tag_name]
+    query = MetadataSearchDto(type_=AssetTypeEnum.IMAGE, tag_ids=[tag_id])
+    exclusions = load_exclusions(db)
+    source = job.params.get("source", "poll")
+    if source not in {"poll", "webhook", "manual"}:
+        source = "poll"
+    for page, checkpoint in client.iter_asset_pages(query, page=job.scan_page, cursor=job.scan_cursor):
+        if jobs.is_canceled(db, job.id):
+            break
+        candidates = []
+        for asset in page:
+            if jobs.is_canceled(db, job.id):
+                break
+            asset_id = str(asset.id)
+            eligible, _, _ = check_auto_eligibility(
+                client, db, asset_id, asset=asset, rules=rules, exclusions=exclusions,
+            )
+            if eligible:
+                candidates.append(asset_id)
+        jobs.enqueue_scan_items(
+            db, job.id, candidates, source,
+            next_page=checkpoint if isinstance(checkpoint, int) else None,
+            next_cursor=checkpoint if isinstance(checkpoint, str) else None,
+            defer_until_discovered=True, complete_discovery=checkpoint is None,
+        )
+    with db.connect() as conn:
+        conn.execute("UPDATE jobs SET discovery_complete=1 WHERE id=?", (job.id,))
+    events.log_event(db, "system", "scan_split", {"job_id": job.id})
+
+
 def run_classify_item(db: Database, client, llm, job: jobs.JobRow,
                       cfg_factory: Callable[[], PipelineConfig]) -> None:
-    """classify_item：分类单张图。进度记到**父 job**；传给管线的 job_id 是
-    父 id（change_log / asset_records / asset_state 都归父——undo 按钮与
-    失败清单才能继续工作）。cfg 每 job 读一次 = 配置热生效。
-
-    计数恰好一次：``counted`` 守卫保证 _record_result（写事件）抛错时不会在
-    except 里重复 incr_progress——否则 done+failed 会超过 total。
-
-    error 结果**一律**先 sleep 1s 再复查 _already_done（不只租约冲突：管线
-    无法区分租约冲突与真实失败），因此真实失败（LLM/Immich 挂）也多付 1s。
-    两个兄弟子任务并发分类同一张图时二者都可能 incr 父计数 → done 可能短暂
-    超过 total（子任务级去重是 split 层的事，这里不做全局去重）。"""
+    """Process one scan item and complete it atomically with the parent counter."""
     parent_id: int | None = None
-    counted = False
     try:
         parent_id = int(job.params["parent_job_id"])
         asset_id = job.params["asset_id"]
         cfg = cfg_factory()
-        if _already_done(db, asset_id):        # 幂等二次确认
+        if _already_done(db, asset_id):
             # 已完成却仍挂着队列标签（拆分后、本子任务执行前被并发副本抢先
             # 处理且其 untag 失败，或历史 untag 假成功的遗留）→ 补摘标签。
             # 否则该图会永久残留「未分类」标签，被后续每轮 scan 反复发现。
             _heal_queue_tag(db, client, asset_id, cfg.queue_tag_name)
-            jobs.incr_progress(db, parent_id)
-            counted = True
-            jobs.finish_job(db, job.id)
+            jobs.finish_scan_item(db, job.id, parent_id)
             return
         result = classify_asset(
             db, client, llm, asset_id, cfg,
             source=job.params.get("source", "poll"),
             dry_run=False,
             job_id=parent_id,
-            prompt_version_id=_active_prompt_version_id(db),
+            prompt_version_id=cfg.prompt_version_id,
+            auto_check=client is not None,
         )
-        if result.status == "error":
-            # 可能是并发副本持有租约（claim 失败即返回 error）：稍候复查。
-            # 若这段时间里该图已被并发副本跑完（_already_done 变真），计 done
-            # 而非 failed——否则同一张图会被两个子任务各记一次失败。
-            time.sleep(1.0)
+        if result.status == "busy":
             if _already_done(db, asset_id):
-                jobs.incr_progress(db, parent_id)
-                counted = True
-                jobs.finish_job(db, job.id)
-                return
-        jobs.incr_progress(db, parent_id, failed=(result.status == "error"))
-        counted = True
+                jobs.finish_scan_item(db, job.id, parent_id)
+            else:
+                jobs.defer_discovery(db, job.id, delay_seconds=5)
+            return
+        jobs.finish_scan_item(db, job.id, parent_id,
+                              error=(result.apply_error or "Classification failed") if result.failed else None)
         _record_result(db, parent_id, result, dry_run=False)
-        jobs.finish_job(db, job.id)
     except Exception as exc:  # noqa: BLE001
+        if parent_id is None:
+            jobs.finish_job(db, job.id, error=str(exc))
+        else:
+            jobs.finish_scan_item(db, job.id, parent_id, error=str(exc))
         _log_job_event(db, "job_error", job, error=str(exc))
-        # parent_id 未解析出来（params 畸形）则无法归因父 job；否则计一次失败。
-        if parent_id is not None and not counted:
-            jobs.incr_progress(db, parent_id, failed=True)
-        jobs.finish_job(db, job.id, error=str(exc))
 
 
 def _active_prompt_version_id(db: Database) -> int | None:
@@ -353,17 +370,7 @@ def _active_prompt_version_id(db: Database) -> int | None:
     - active 有值且行存在 → 该 id。
     - active 有值但行缺失（悬空）→ None：build_pipeline_config 此时回退内置
       DEFAULT_PROMPT_TEMPLATE（**不是**最新版本），故没有版本 id 可记。"""
-    settings = SettingsStore(db)
-    pv_id = settings.get("active_prompt_version_id")
-    with db.connect() as conn:
-        if pv_id is not None:
-            row = conn.execute("SELECT id FROM prompt_versions WHERE id = ?",
-                               (pv_id,)).fetchone()
-            return row["id"] if row is not None else None
-        row = conn.execute(
-            "SELECT id FROM prompt_versions "
-            "ORDER BY created_at DESC, id DESC LIMIT 1").fetchone()
-    return row["id"] if row is not None else None
+    return build_pipeline_config(db).prompt_version_id
 
 
 def finish_scan_parent(db: Database, job_id: int) -> None:
@@ -388,8 +395,8 @@ def _safe_log_event(db: Database, event_type: str, payload: dict) -> None:
         pass
 
 
-def start_scan_coordinator(db_path: str | Path,
-                           parent_job_id: int) -> threading.Thread:
+def start_scan_coordinator(db_path: str | Path, parent_job_id: int, *,
+                           stop_event: threading.Event | None = None) -> threading.Thread:
     """守护线程：轮询 pending_children 直到 0，再收尾父 scan。
     不占用 worker 池线程（spec：分类并发 = worker 数）。
 
@@ -401,13 +408,19 @@ def start_scan_coordinator(db_path: str | Path,
     进程重启才恢复。"""
     def _loop() -> None:
         db = Database(db_path)
+        stop = stop_event or threading.Event()
         deadline = time.monotonic() + SCAN_COORDINATOR_TIMEOUT
         last_error_log: float | None = None
-        while time.monotonic() < deadline:
+        progress = None
+        while not stop.is_set() and time.monotonic() < deadline:
             try:
                 job = jobs.get_job(db, parent_job_id)
                 if job is None or job.status != "running":
                     return
+                current_progress = job.done + job.failed
+                if progress is not None and current_progress > progress:
+                    deadline = time.monotonic() + SCAN_COORDINATOR_TIMEOUT
+                progress = current_progress
                 finish_scan_parent(db, parent_job_id)
                 if jobs.get_job(db, parent_job_id).status != "running":
                     return
@@ -418,14 +431,17 @@ def start_scan_coordinator(db_path: str | Path,
                     last_error_log = now
                     _safe_log_event(db, "scan_coordinator_error",
                                     {"job_id": parent_job_id, "error": str(exc)})
-            time.sleep(SCAN_COORD_POLL_SECONDS)
+            stop.wait(SCAN_COORD_POLL_SECONDS)
 
+        if stop.is_set():
+            return
         _safe_log_event(db, "scan_coordinator_timeout",
                         {"job_id": parent_job_id})
         # 失败父 job：让轮询调度无需重启即可恢复（I1/H1）。
         try:
             job = jobs.get_job(db, parent_job_id)
             if job is not None and job.status == "running":
+                jobs.cancel_children_of(db, parent_job_id)
                 jobs.finish_job(db, parent_job_id,
                                 error="scan coordinator timeout")
         except Exception:  # noqa: BLE001, S110
@@ -438,30 +454,10 @@ def start_scan_coordinator(db_path: str | Path,
 
 
 def _already_done(db: Database, asset_id: str) -> bool:
-    """"已完成"过滤。看**最新一条**非 dry_run 记录（不是"存在任一条"）：
-    资产被 reclassify 后可能同时有"旧的已应用记录"与"新的失败记录"，
-    用 EXISTS 会让失败那次永不重试（§7.1）。
-
-    已完成 ⇔ 最新记录 status='ok' AND applied_at IS NOT NULL
-             OR 重试已耗尽（apply_attempts ≥ apply_max_attempts，§7.3）。
-    """
+    """Use the durable asset state, with a fallback for older records."""
     with db.connect() as conn:
-        row = conn.execute(
-            "SELECT status, applied_at FROM asset_records "
-            " WHERE asset_id = ? AND dry_run = 0 "
-            " ORDER BY created_at DESC, id DESC LIMIT 1",
-            (asset_id,),
-        ).fetchone()
-        if row is not None and row["status"] == "ok" and row["applied_at"] is not None:
-            return True
-        st = conn.execute(
-            "SELECT apply_attempts FROM asset_state WHERE asset_id = ?",
-            (asset_id,),
-        ).fetchone()
-        if st is None:
-            return False
-    # 连接已关：SettingsStore 会自己开连接（WAL 下并发读安全）
-    return int(st["apply_attempts"]) >= int(SettingsStore(db).get("apply_max_attempts"))
+        return processing_complete(conn, asset_id)
+
 
 
 def _heal_queue_tag(db: Database, client, asset_id: str, queue_tag_name: str) -> None:
@@ -502,14 +498,14 @@ def run_job(db: Database, client, llm, job: jobs.JobRow, *,
     启动协调器线程——协调器不占 worker 池线程。
     """
     if job.type in ("single", "dryrun"):
-        run_single_job(db, client, llm, job, build_pipeline_config(db))
+        run_single_job(db, client, llm, job, build_pipeline_config(db, job))
     elif job.type == "classify_item":
         run_classify_item(db, client, llm, job,
-                          lambda: build_pipeline_config(db))
+                          lambda: build_pipeline_config(db, job))
     elif job.type == "scan":
         # cfg_factory 是零参回调（run_scan_job 约定），build_pipeline_config 需要 db ——
         # 真机曾因此炸：直接传函数对象，cfg_factory() 调用时缺 db 参数
-        run_scan_job(db, client, llm, job, lambda: build_pipeline_config(db))
+        run_scan_job(db, client, llm, job, lambda: build_pipeline_config(db, job))
         # 拆分成功（父仍 running）才收尾；失败/被取消的父无需协调器。
         # 未注入回调时**直接**起协调器——否则父永远停在 running（I2）。
         if jobs.get_job(db, job.id).status == "running":
@@ -518,10 +514,10 @@ def run_job(db: Database, client, llm, job: jobs.JobRow, *,
             else:
                 start_scan_coordinator(db.path, job.id)
     elif job.type == "backfill":
-        run_backfill_job(db, client, job, lambda: build_pipeline_config(db))
+        run_backfill_job(db, client, job, lambda: build_pipeline_config(db, job))
     elif job.type == "reclassify":
         run_reclassify_job(db, client, llm, job,
-                           lambda: build_pipeline_config(db))
+                           lambda: build_pipeline_config(db, job))
     elif job.type == "reset":
         run_reset_job(db, client, job)
     elif job.type == "undo":
@@ -549,30 +545,27 @@ def run_undo_job(db: Database, client, job: jobs.JobRow) -> None:
 def _run_undo_job(db, client, job) -> None:
     target_job_id = int(job.params["target_job_id"])
     session = UndoSession(db, client, undo_job_id=job.id)
+    session.prepare(target_job_id)
 
     total = session.total(target_job_id)
+    finished, skipped = session.progress()
     with db.connect() as conn:
-        conn.execute("UPDATE jobs SET total = ? WHERE id = ?",
-                     (total, job.id))
+        conn.execute("UPDATE jobs SET total=?, done=? WHERE id=?", (total, finished, job.id))
 
     _log_job_event(db, "job_started", job, target_job_id=target_job_id,
                    total=total)
 
-    undone = 0
     for row in session.load_rows(target_job_id):
         # 取消检查在每条之间（语义同 scan）
         if jobs.is_canceled(db, job.id):
             break
-        # total = apply 条数；404 跳过的一条同样 incr（进度语义按条数计）。
-        # 跳过不是失败（对应关系已被用户手工删除是预期路径），不计 failed；
-        # 但 undone 只统计实际执行的条
-        if session.undo_row(row):
-            undone += 1
-        jobs.incr_progress(db, job.id)
+        session.undo_row(row)
+        finished, skipped = session.progress()
+        with db.connect() as conn:
+            conn.execute("UPDATE jobs SET done=? WHERE id=?", (finished, job.id))
 
-    session.flush_state()
     jobs.finish_job(db, job.id)
-    _log_job_event(db, "job_complete", job, undone=undone, total=total)
+    _log_job_event(db, "job_complete", job, undone=finished - skipped, total=total, conflicts=skipped)
 
 
 # ------------------------------------------------------- backfill
@@ -586,6 +579,14 @@ def run_backfill_job(db: Database, client, job: jobs.JobRow,
     入队不是分类结果：不写 change_log、不改 asset_state（计划已决策）。"""
     try:
         _run_backfill_job(db, client, job, cfg_factory)
+    except ImmichScanIncomplete as exc:
+        _pause_discovery(db, job.id, str(exc))
+    except ImmichError as exc:
+        if hasattr(client, "iter_asset_pages") and _temporarily_unavailable(exc):
+            _pause_discovery(db, job.id, str(exc))
+        else:
+            _log_job_event(db, "job_error", job, error=str(exc))
+            jobs.finish_job(db, job.id, error=str(exc))
     except Exception as exc:  # noqa: BLE001
         _log_job_event(db, "job_error", job, error=str(exc))
         jobs.finish_job(db, job.id, error=str(exc))
@@ -594,6 +595,10 @@ def run_backfill_job(db: Database, client, job: jobs.JobRow,
 def _run_backfill_job(db, client, job, cfg_factory) -> None:
     queue_tag_name = cfg_factory().queue_tag_name
     rules = load_scope_rules(db)
+
+    if hasattr(client, "iter_asset_pages"):
+        _backfill_pages(db, client, job, queue_tag_name, rules)
+        return
 
     candidates = [
         aid for aid in iter_scope_assets(client, db, rules)
@@ -626,6 +631,35 @@ def _run_backfill_job(db, client, job, cfg_factory) -> None:
     _log_job_event(db, "job_complete", job, done=done, total=total)
 
 
+def _backfill_pages(db, client, job, queue_tag_name, rules):
+    exclusions = load_exclusions(db)
+    dto = MetadataSearchDto(type_=AssetTypeEnum.IMAGE)
+    tag_id = client.ensure_tags([queue_tag_name])[queue_tag_name]
+    for page, checkpoint in client.iter_asset_pages(dto, page=job.scan_page,
+                                                    cursor=job.scan_cursor, size=BACKFILL_BATCH_SIZE):
+        if jobs.is_canceled(db, job.id):
+            break
+        ids = []
+        for asset in page:
+            asset_id = str(asset.id)
+            if not _already_done(db, asset_id) and check_auto_eligibility(
+                client, db, asset_id, asset=asset, rules=rules, exclusions=exclusions,
+            )[0]:
+                ids.append(asset_id)
+        if jobs.is_canceled(db, job.id):
+            break
+        if ids:
+            client.tag_assets([tag_id], ids)
+        with db.connect() as conn:
+            conn.execute(
+                "UPDATE jobs SET done=done+?, total=total+?, scan_page=COALESCE(?, scan_page), "
+                "scan_cursor=?, discovery_complete=? WHERE id=?",
+                (len(ids), len(ids), checkpoint if isinstance(checkpoint, int) else None,
+                 checkpoint if isinstance(checkpoint, str) else None, checkpoint is None, job.id),
+            )
+    jobs.finish_job(db, job.id)
+
+
 # ---------------------------------------------------- reclassify
 
 
@@ -649,22 +683,29 @@ def _run_reclassify_job(db, client, llm, job, cfg_factory) -> None:
     _log_job_event(db, "job_started", job, total=total)
 
     cfg = cfg_factory()
-    failed = 0
-    for asset_id in asset_ids:
+    for asset_id in asset_ids[job.done + job.failed:]:
         # 取消检查在每张之间
         if jobs.is_canceled(db, job.id):
             break
-        result = reclassify_asset(
-            db, client, llm, cfg, asset_id, job_id=job.id,
-            prompt_version_id=job.prompt_version_id,
-        )
-        if result.status == "error":
-            failed += 1
-        jobs.incr_progress(db, job.id, failed=(result.status == "error"))
+        with db.connect() as conn:
+            previous = conn.execute(
+                "SELECT apply_status FROM asset_records WHERE job_id=? AND asset_id=? ORDER BY id DESC LIMIT 1",
+                (job.id, asset_id),
+            ).fetchone()
+        if previous and previous["apply_status"] == "applied":
+            jobs.incr_progress(db, job.id)
+        else:
+            result = reclassify_asset(
+                db, client, llm, cfg, asset_id, job_id=job.id,
+                prompt_version_id=cfg.prompt_version_id or job.prompt_version_id,
+            )
+            jobs.incr_progress(db, job.id, failed=result.failed)
 
-    jobs.finish_job(db, job.id)
-    _log_job_event(db, "job_complete", job, done=total - failed,
-                   failed=failed, total=total)
+    current = jobs.get_job(db, job.id)
+    jobs.finish_job(db, job.id, error=(f"{current.failed} assets could not be reclassified"
+                                      if current.failed else None))
+    _log_job_event(db, "job_complete", job, done=current.done,
+                   failed=current.failed, total=total)
 
 
 # --------------------------------------------------------- reset
@@ -685,8 +726,12 @@ def run_reset_job(db: Database, client, job: jobs.JobRow) -> None:
 def _run_reset_job(db, client, job) -> None:
     _log_job_event(db, "job_started", job)
     dims = job.params.get("dimensions")
+    def update_progress(attempted, total, skipped):
+        with db.connect() as conn:
+            conn.execute("UPDATE jobs SET done=?, total=? WHERE id=?", (attempted, total, job.id))
+
     done = run_reset_steps(db, client, job_id=job.id,
                            is_canceled=lambda: jobs.is_canceled(db, job.id),
-                           dimensions=set(dims) if dims else None)
+                           dimensions=set(dims) if dims else None, on_progress=update_progress)
     jobs.finish_job(db, job.id)
     _log_job_event(db, "job_complete", job, **done)

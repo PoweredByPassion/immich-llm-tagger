@@ -17,6 +17,7 @@
 """
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -63,11 +64,20 @@ class LLMClient:
         self._model = model
         self._timeout = float(timeout)
         self._max_tokens = max_tokens
+        self._owns_http = http is None
         # 显式 timeout：httpx 默认 5s，对 vision 大模型远远不够。
         self._http = http or httpx.Client(
             base_url=self._base_url,
             timeout=httpx.Timeout(self._timeout),
         )
+
+    def close(self) -> None:
+        if self._owns_http:
+            self._http.close()
+
+    @property
+    def base_url(self) -> str:
+        return self._base_url
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -85,7 +95,9 @@ class LLMClient:
         header = resp.headers.get("retry-after")
         if header is not None:
             try:
-                return float(header)
+                delay = float(header)
+                if math.isfinite(delay) and delay >= 0:
+                    return min(delay, 60.0)
             except ValueError:
                 pass
         return cls._backoff(attempt)
@@ -109,7 +121,7 @@ class LLMClient:
 
             # 429：重试，尊重 retry-after。
             if resp.status_code == 429:
-                last_exc = LLMError(f"LLM 返回 429: {resp.text[:200]}",
+                last_exc = LLMError("LLM 返回 429",
                                     status_code=429)
                 if attempt + 1 < retries:
                     time.sleep(self._retry_delay(resp, attempt))
@@ -117,7 +129,7 @@ class LLMClient:
 
             # 5xx：指数退避重试。
             if resp.status_code >= 500:
-                last_exc = LLMError(f"LLM 返回 {resp.status_code}: {resp.text[:200]}",
+                last_exc = LLMError(f"LLM 返回 {resp.status_code}",
                                     status_code=resp.status_code)
                 if attempt + 1 < retries:
                     time.sleep(self._backoff(attempt))
@@ -125,12 +137,13 @@ class LLMClient:
 
             # 其他 4xx：认证/参数错误，重试无意义，立即失败。
             if resp.status_code >= 400:
-                raise LLMError(f"LLM 返回 {resp.status_code}: {resp.text[:200]}",
+                raise LLMError(f"LLM 返回 {resp.status_code}",
                                status_code=resp.status_code)
 
             return self._parse_chat(resp)
 
-        raise LLMError(f"LLM 调用在 {retries} 次尝试后仍失败: {last_exc}") from last_exc
+        raise LLMError(f"LLM 调用在 {retries} 次尝试后仍失败: {last_exc}",
+                       status_code=getattr(last_exc, "status_code", None)) from last_exc
 
     @staticmethod
     def _parse_chat(resp: httpx.Response) -> ChatResult:

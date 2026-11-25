@@ -14,29 +14,33 @@
 """
 from __future__ import annotations
 
-import logging
+import threading
 import time
 from collections.abc import Callable, Iterator
 from typing import Any
+from urllib.parse import urlsplit
+from uuid import UUID
 
 import httpx
 
-from app.clients._immich_gen.api.albums import add_assets_to_album as _add_assets_to_album
 from app.clients._immich_gen.api.albums import (
-    remove_asset_from_album as _remove_asset_from_album,
+    add_assets_to_album as _add_assets_to_album,
 )
 from app.clients._immich_gen.api.albums import create_album as _create_album
 from app.clients._immich_gen.api.albums import get_all_albums as _get_all_albums
-from app.clients._immich_gen.api.assets import get_asset_statistics
+from app.clients._immich_gen.api.albums import (
+    remove_asset_from_album as _remove_asset_from_album,
+)
 from app.clients._immich_gen.api.assets import (
     get_asset_info as _get_asset_info,
 )
+from app.clients._immich_gen.api.assets import get_asset_statistics
+from app.clients._immich_gen.api.assets import update_assets as _update_assets
+from app.clients._immich_gen.api.assets import view_asset as _view_asset
 from app.clients._immich_gen.api.libraries import (
     get_all_libraries as _get_all_libraries,
 )
 from app.clients._immich_gen.api.search import search_assets
-from app.clients._immich_gen.api.assets import update_assets as _update_assets
-from app.clients._immich_gen.api.assets import view_asset as _view_asset
 from app.clients._immich_gen.api.tags import delete_tag as _delete_tag
 from app.clients._immich_gen.api.tags import get_all_tags
 from app.clients._immich_gen.api.tags import (
@@ -53,7 +57,9 @@ from app.clients._immich_gen.models.album_response_dto import AlbumResponseDto
 from app.clients._immich_gen.models.asset_bulk_update_dto import AssetBulkUpdateDto
 from app.clients._immich_gen.models.asset_media_size import AssetMediaSize
 from app.clients._immich_gen.models.asset_response_dto import AssetResponseDto
-from app.clients._immich_gen.models.asset_stats_response_dto import AssetStatsResponseDto
+from app.clients._immich_gen.models.asset_stats_response_dto import (
+    AssetStatsResponseDto,
+)
 from app.clients._immich_gen.models.asset_visibility import AssetVisibility
 from app.clients._immich_gen.models.bulk_id_error_reason import BulkIdErrorReason
 from app.clients._immich_gen.models.bulk_id_response_dto import BulkIdResponseDto
@@ -85,6 +91,14 @@ class ImmichError(RuntimeError):
         self.status_code = status_code
 
 
+class ImmichScanIncomplete(ImmichError):
+    """The search exceeded its time budget before the last page."""
+
+    def __init__(self, next_page: int) -> None:
+        super().__init__(f"Immich scan paused before page {next_page}")
+        self.next_page = next_page
+
+
 # iter_assets 分页循环的整体时间上限（秒）：大库止损，超时返回已收集部分。
 ITER_TIME_LIMIT = 300.0
 
@@ -99,6 +113,9 @@ class ImmichClient:
         httpx_args: dict[str, Any] | None = None,
     ) -> None:
         self._raw_base_url = base_url.rstrip("/")
+        self._tag_cache_lock = threading.Lock()
+        self._tag_cache: dict[str, str] = {}
+        self._tag_cache_until = 0.0
         api_base = f"{self._raw_base_url}/api"
         # 注意：timeout / verify_ssl 必须作为 AuthenticatedClient 的独立参数传，
         # 不能塞进 httpx_args —— 生成器构造 httpx.Client 时已经显式传了 timeout=
@@ -114,7 +131,17 @@ class ImmichClient:
             raise_on_unexpected_status=False,
         )
 
+    def open(self) -> None:
+        self._client.get_httpx_client()
+
+    def close(self) -> None:
+        if self._client._client is not None:
+            self._client._client.close()
+
     def _run(self, call: Callable[..., Response[Any]], **kwargs: Any) -> Response[Any]:
+        endpoint = urlsplit(self._raw_base_url)
+        if endpoint.scheme not in {"http", "https"} or not endpoint.hostname:
+            raise ImmichError("Configure a valid HTTP or HTTPS address for Immich")
         # 生成的 sync_detailed 函数签名是 `sync_detailed(*, client, ...)` —— client
         # 是 keyword-only。用 sync_detailed 而不是 sync，是为了拿到 Response 对象，
         # 把状态码带进 ImmichError.status_code（404 逃生口依赖它）。
@@ -166,6 +193,13 @@ class ImmichClient:
         """全部相册（不带 name 过滤）。"""
         return self._run(_get_all_albums.sync_detailed).parsed or []
 
+    def list_asset_albums(self, asset_id: str) -> list[AlbumResponseDto]:
+        try:
+            identifier = UUID(asset_id)
+        except ValueError as exc:
+            raise ImmichError("Invalid Immich asset ID") from exc
+        return self._run(_get_all_albums.sync_detailed, asset_id=identifier).parsed or []
+
     def iter_assets(
         self, dto: MetadataSearchDto, size: int = 1000
     ) -> Iterator[AssetResponseDto]:
@@ -173,25 +207,38 @@ class ImmichClient:
         Immich 的 total 不可靠，以 nextPage 为准。
         dto 的 page / size 由本方法接管，调用方设的值会被覆盖。
         """
-        page = 1
+        for items, _ in self.iter_asset_pages(dto, size=size):
+            yield from items
+
+    def iter_asset_pages(self, dto: MetadataSearchDto, *, size: int = 1000,
+                         page: int = 1, cursor: str | None = None):
         deadline = time.monotonic() + ITER_TIME_LIMIT
         while True:
             if time.monotonic() > deadline:
-                logging.warning(
-                    "iter_assets 翻页整体超时（限 %ss），提前停止迭代",
-                    ITER_TIME_LIMIT,
-                )
-                return
-            dto.page = page
+                raise ImmichScanIncomplete(page)
+            dto.page = page if cursor is None else UNSET
+            dto.cursor = cursor if cursor is not None else UNSET
             dto.size = size
             result = self._run(search_assets.sync_detailed, body=dto).parsed
             assets = result.assets
             items = list(assets.items)
-            yield from items
+            next_cursor = getattr(assets, "next_cursor", None)
             next_page = assets.next_page
-            if not items or not next_page:
-                break
-            page = self._as_page(next_page)
+            if not items or not (next_cursor or next_page):
+                yield items, None
+                return
+            if next_cursor:
+                if next_cursor == cursor:
+                    raise ImmichError("Immich search returned a repeated cursor")
+                yield items, next_cursor
+                cursor = next_cursor
+                continue
+            next_page = self._as_page(next_page)
+            if next_page <= page:
+                raise ImmichError(f"Immich search returned a non-advancing page: {next_page}")
+            yield items, next_page
+            page = next_page
+            cursor = None
 
     def fetch_thumbnail_bytes(self, asset_id: str, size: str = "preview") -> bytes:
         """取缩略图的**原始字节**。端点返回二进制，不做任何 JSON 解析。
@@ -208,14 +255,16 @@ class ImmichClient:
 
         已存在的直接复用，缺的才 upsert（一次批量请求）。
         """
-        existing = {tag.name: str(tag.id) for tag in self.list_tags()}
-        missing = [n for n in names if n not in existing]
-        if missing:
-            response = self._run(_upsert_tags.sync_detailed, body=TagUpsertDto(tags=missing))
-            if response.parsed:
-                for tag in response.parsed:
-                    existing[tag.name] = str(tag.id)
-        return {n: existing[n] for n in names}
+        with self._tag_cache_lock:
+            if time.monotonic() >= self._tag_cache_until:
+                self._tag_cache = {tag.name: str(tag.id) for tag in self.list_tags()}
+                self._tag_cache_until = time.monotonic() + 30
+            missing = list(dict.fromkeys(name for name in names if name not in self._tag_cache))
+            if missing:
+                response = self._run(_upsert_tags.sync_detailed, body=TagUpsertDto(tags=missing))
+                for tag in response.parsed or []:
+                    self._tag_cache[tag.name] = str(tag.id)
+            return {name: self._tag_cache[name] for name in names}
 
     # tag/untag/album 批量端点（PUT/DELETE /tags/{id}/assets、PUT /albums/{id}/assets）
     # 的返回是逐项结果 [{"id":..., "success": true/false, "error": "duplicate"|"not_found"|...}]。
@@ -272,9 +321,10 @@ class ImmichClient:
         try:
             self._run(_delete_tag.sync_detailed, id=_UUID(tag_id))
         except ImmichError as exc:
-            if exc.status_code == 404:
-                return
-            raise
+            if exc.status_code != 404:
+                raise
+        with self._tag_cache_lock:
+            self._tag_cache_until = 0
 
     def untag_assets(self, tag_id: str, asset_ids: list[str]) -> None:
         """从 tag 上批量摘除资产。空列表即安全 no-op。"""
@@ -350,11 +400,11 @@ class ImmichClient:
             return
         for i in range(0, len(asset_ids), ALBUM_ASSET_BATCH_SIZE):
             chunk = asset_ids[i : i + ALBUM_ASSET_BATCH_SIZE]
-            self._run(
+            self._check_bulk_results(self._run(
                 _remove_asset_from_album.sync_detailed,
                 id=album_id,
                 body=BulkIdsDto(ids=chunk),
-            )
+            ))
 
     def add_to_album(self, album_id: str, asset_ids: list[str]) -> None:
         """批量把资产加入相册。空列表即安全 no-op。"""

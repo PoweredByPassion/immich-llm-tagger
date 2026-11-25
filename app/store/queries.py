@@ -55,12 +55,13 @@ def overview(db: Database, tz_name: str | None = None) -> dict:
         ).fetchall()
         processed = conn.execute(
             "SELECT COUNT(*) AS n FROM asset_records "
-            "WHERE created_at >= ? AND status = 'ok'",
+            "WHERE dry_run = 0 AND applied_at >= ?",
             (today_start,),
         ).fetchone()["n"]
         failed = conn.execute(
             "SELECT COUNT(*) AS n FROM asset_records "
-            "WHERE created_at >= ? AND status = 'error'",
+            "WHERE dry_run = 0 AND created_at >= ? "
+            "AND (status = 'error' OR apply_status = 'failed')",
             (today_start,),
         ).fetchone()["n"]
         archived = conn.execute(

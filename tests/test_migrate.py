@@ -7,12 +7,16 @@ from app.db.connection import Database
 from app.db.migrate import MIGRATIONS_DIR, _discover, current_version, migrate
 
 
+def latest_version() -> int:
+    return max(version for version, _ in _discover())
+
+
 def test_migrate_creates_schema_version_table(tmp_path: Path) -> None:
     db = Database(tmp_path / "t.db")
     migrate(db)
     with db.connect() as conn:
         rows = conn.execute("SELECT version FROM schema_version ORDER BY version").fetchall()
-    assert [r["version"] for r in rows] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+    assert [r["version"] for r in rows] == list(range(1, latest_version() + 1))
 
 
 def test_migrate_creates_all_config_tables(tmp_path: Path) -> None:
@@ -47,7 +51,7 @@ def test_migrate_is_idempotent(tmp_path: Path) -> None:
     migrate(db)
     with db.connect() as conn:
         count = conn.execute("SELECT COUNT(*) AS c FROM schema_version").fetchone()["c"]
-    assert count == 12
+    assert count == latest_version()
 
 
 def test_current_version_zero_when_fresh(tmp_path: Path) -> None:
@@ -339,7 +343,7 @@ def test_v9_rebuild_preserves_rows_and_columns(tmp_path: Path) -> None:
         conn.execute("INSERT INTO jobs (type, status) VALUES ('single','queued')")
         conn.execute("DELETE FROM jobs WHERE id = 2")   # 制造 id 空洞
 
-    assert migrate(db) == 12
+    assert migrate(db) == latest_version()
 
     with db.connect() as conn:
         row = conn.execute("SELECT * FROM jobs WHERE id = 1").fetchone()
@@ -366,7 +370,7 @@ def test_v9_preserves_autoincrement_counter_when_jobs_empty(tmp_path: Path) -> N
             conn.execute("INSERT INTO jobs (type, status) VALUES ('scan','done')")
         conn.execute("DELETE FROM jobs")              # 计数器停在 3，表为空
 
-    assert migrate(db) == 12
+    assert migrate(db) == latest_version()
 
     with db.connect() as conn:
         assert conn.execute("SELECT COUNT(*) AS n FROM jobs").fetchone()["n"] == 0
@@ -381,7 +385,7 @@ def test_v10_drops_llm_concurrency_column(tmp_path: Path) -> None:
     fresh 库会先经 v1 建出该列、再被 v10 DROP，等价于升级已有库的路径。
     """
     db = Database(tmp_path / "t.db")
-    assert migrate(db) == 12
+    assert migrate(db) == latest_version()
     with db.connect() as conn:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(llm_conn)")}
     assert "concurrency" not in cols
@@ -413,7 +417,7 @@ def _seed_v10_db(tmp_path: Path) -> Database:
 
 def test_v11_adds_columns_and_widens_change_log(tmp_path: Path) -> None:
     db = Database(tmp_path / "t.db")
-    assert migrate(db) == 12
+    assert migrate(db) == latest_version()
     with db.connect() as conn:
         cols_r = {r["name"] for r in conn.execute("PRAGMA table_info(asset_records)")}
         cols_s = {r["name"] for r in conn.execute("PRAGMA table_info(asset_state)")}
@@ -437,7 +441,7 @@ def test_v11_backfills_applied_at_only_for_applied_rows(tmp_path: Path) -> None:
             "       ('err','poll','error',0,'2026-01-01 00:00:00')"
         )
 
-    assert migrate(db) == 12
+    assert migrate(db) == latest_version()
 
     with db.connect() as conn:
         got = {r["asset_id"]: r["applied_at"] for r in conn.execute(
@@ -459,7 +463,7 @@ def test_v11_change_log_rebuild_keeps_autoincrement(tmp_path: Path) -> None:
                          "VALUES ('a1','tag_add','apply','{}')")
         conn.execute("DELETE FROM change_log")        # 表空，seq 停在 2
 
-    assert migrate(db) == 12
+    assert migrate(db) == latest_version()
 
     with db.connect() as conn:
         conn.execute("INSERT INTO change_log (asset_id, action, direction, payload) "
@@ -500,7 +504,7 @@ def test_v12_adds_write_flags_defaulting_to_on(tmp_path: Path) -> None:
         conn.execute("INSERT INTO tags (name, kind, archive, enabled) "
                      "VALUES ('截图', 'primary', 1, 1)")
 
-    assert migrate(db) == 12
+    assert migrate(db) == latest_version()
 
     with db.connect() as conn:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(tags)")}

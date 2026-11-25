@@ -2,7 +2,8 @@ services:
   immich-llm-tagger:
     image: ghcr.io/poweredbypassion/immich-llm-tagger:latest
     ports:
-      - "8080:8080"
+      - "${TAGGER_BIND_ADDRESS:-127.0.0.1}:8080:8080"
+    user: "${TAGGER_UID:-10001}:${TAGGER_GID:-10001}"
     volumes:
       - ./data:/data
     # 让容器能用 host.docker.internal 访问宿主机。
@@ -19,6 +20,20 @@ services:
       LLM_BASE_URL: ${LLM_BASE_URL:-}
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_MODEL: ${LLM_MODEL:-}
-      # 公网部署时启用单密码访问认证；留空则完全旁路（本地零摩擦）。
+      TAGGER_BIND_ADDRESS: ${TAGGER_BIND_ADDRESS:-127.0.0.1}
       AUTH_PASSWORD: ${AUTH_PASSWORD:-}
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        case "$${TAGGER_BIND_ADDRESS}" in
+          127.0.0.1) ;;
+          *)
+            if [ -z "$${AUTH_PASSWORD}" ]; then
+              echo "Set AUTH_PASSWORD before publishing Tagger on a non-loopback address." >&2
+              exit 1
+            fi
+            ;;
+        esac
+        exec uvicorn app.web.app:create_app --factory --host 0.0.0.0 --port 8080
     restart: unless-stopped

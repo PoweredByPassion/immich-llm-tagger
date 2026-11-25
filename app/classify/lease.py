@@ -6,8 +6,6 @@ datetime()，不要在 Python 里拼字符串（isoformat() 的 'T' 会被 CHECK
 """
 from __future__ import annotations
 
-import sqlite3
-
 from app.db.connection import Database
 
 # 与 LLMClient.chat 的默认 retries=4 保持一致。

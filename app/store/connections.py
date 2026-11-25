@@ -49,15 +49,19 @@ class ConnectionStore:
                 "verify_ssl = excluded.verify_ssl",
                 (conn_cfg.url, conn_cfg.api_key, int(conn_cfg.verify_ssl)),
             )
+            conn.execute("DELETE FROM settings WHERE key='llm_paused_reason' "
+                         "AND json_extract(value,'$') LIKE 'Immich %'")
 
     # ---------------------------------------------------------------- llm
 
-    def get_llm(self) -> LLMConn:
-        with self._db.connect() as conn:
-            row = conn.execute(
+    def get_llm(self, conn=None) -> LLMConn:
+        if conn is None:
+            with self._db.connect() as opened:
+                return self.get_llm(opened)
+        row = conn.execute(
                 "SELECT base_url, api_key, model, timeout, max_tokens, "
                 "multimodal FROM llm_conn WHERE id = 1"
-            ).fetchone()
+        ).fetchone()
         if row is None:
             return LLMConn()
         return LLMConn(
@@ -83,3 +87,5 @@ class ConnectionStore:
                  conn_cfg.timeout, conn_cfg.max_tokens,
                  int(conn_cfg.multimodal)),
             )
+            conn.execute("DELETE FROM settings WHERE key='llm_paused_reason' "
+                         "AND json_extract(value,'$') LIKE 'Model %'")

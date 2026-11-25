@@ -1,10 +1,4 @@
-"""M6 Task 2: reclassify_asset 的测试。
-
-语义（设计 §5.8）：摘"本系统管理的标签"∩ 实际拥有 → change_log(tag_remove,
-job_id=本 job) → 清空 current_tag/current_markers、更新 last_job_id →
-classify_asset(source="manual") 重跑；重分类显式发起不受 manual_override
-限制（§5.5），重跑走 override_manual=False。
-"""
+"""Reclassification keeps previous edits until a valid fresh result is ready."""
 from __future__ import annotations
 
 import json
@@ -38,27 +32,33 @@ def insert_tag(db, name, kind="primary"):
 class FakeClient:
     def __init__(self, owned_tags=("风景", "我的手打标签"), rating=None):
         self.owned = list(owned_tags)
+        self.tag_ids: dict[str, str] = {}
         self.rating = rating                       # get_asset 暴露的"当前评分"
         self.untagged: list[tuple[str, list[str]]] = []
         self.set_props_calls: list[dict] = []
 
     def get_asset(self, asset_id):
         class _A:
-            tags = [SimpleNamespace(name=n) for n in self.owned]
+            tags = [SimpleNamespace(name=n, id=self.tag_ids.get(n, f"id-{n}")) for n in self.owned]
             original_file_name = f"{asset_id}.png"
             exif_info = SimpleNamespace(rating=self.rating, description=None)
             local_date_time = None
             visibility = "timeline"
         return _A()
 
+    def list_asset_albums(self, asset_id):
+        return []
+
     def ensure_tags(self, names):
-        return {n: f"id-{n}" for n in names}
+        return {n: self.tag_ids.get(n, f"id-{n}") for n in names}
 
     def untag_assets(self, tag_id, asset_ids):
         self.untagged.append((tag_id, list(asset_ids)))
+        self.owned = [n for n in self.owned if self.tag_ids.get(n, f"id-{n}") != tag_id]
 
     def tag_assets(self, tag_ids, asset_ids):
         self.tagged = getattr(self, "tagged", []) + [(list(tag_ids), list(asset_ids))]
+        self.owned.extend(tag_id.removeprefix("id-") for tag_id in tag_ids)
 
     def set_visibility(self, asset_ids, visibility):
         self.visibility_set = getattr(self, "visibility_set", []) + [(list(asset_ids), visibility)]
@@ -74,11 +74,15 @@ class FakeClient:
             self.set_props_calls.append({"asset_id": a, **props})
 
 
-def make_cfg():
+def make_cfg(*names):
     from app.classify.thumb import ThumbConfig
     from app.store.connections import LLMConn
+    from app.store.tags import TagDef
+    tags = [TagDef(id=i, name=name, kind="primary", enabled=True, description="",
+                   archive=False, album=None, min_confidence=None)
+            for i, name in enumerate(names or ("风景", "人像"), 1)]
     return PipelineConfig(
-        prompt_template="t {{TAG_LIST}}", tags=[],
+        prompt_template="t {{TAG_LIST}}", tags=tags,
         marker_rules=[], fallback_tag="other", default_min_confidence=0.6,
         thumb=ThumbConfig(), queue_tag_name="未分类",
         llm=LLMConn(base_url="http://llm", api_key="k", model="m",
@@ -102,65 +106,130 @@ def seed_state(db, asset_id, **kw):
 
 # --------------------------------------------------------------- 摘旧
 
-def test_removes_only_intersection_of_managed_and_owned(db, monkeypatch):
+def test_reclassify_with_active_lease_keeps_existing_tags(db):
+    from app.classify.lease import claim
+
     insert_tag(db, "风景")
-    insert_tag(db, "天空", "marker")
-    seed_state(db, "a1")
-    client = FakeClient(owned_tags=("风景", "天空", "我的手打标签"))
-    captured = {}
-
-    def fake_classify(db, client, llm, asset_id, cfg, **kw):
-        captured.update(kw)
-        return PipelineResult(asset_id=asset_id, tag="人像", confidence=0.9,
-                              markers=(), status="ok", dry_run=False)
-
-    monkeypatch.setattr(rc_module, "classify_asset", fake_classify)
-    rc_module.reclassify_asset(db, client, None, make_cfg(), "a1", job_id=7)
-
-    # 只摘"风景/天空"，"我的手打标签"不动；tag id 用 ensure_tags 映射
-    assert client.untagged == [("id-天空", ["a1"]), ("id-风景", ["a1"])]
-
-
-def test_change_log_tag_remove_with_job_id(db, monkeypatch):
-    insert_tag(db, "风景")
-    seed_state(db, "a1")
+    assert claim(db, "a1", owner=9, lease_seconds=60)
     client = FakeClient(owned_tags=("风景",))
 
-    monkeypatch.setattr(rc_module, "classify_asset",
-                        lambda *a, **k: PipelineResult(
-                            asset_id="a1", tag="x", confidence=None,
-                            markers=(), status="ok", dry_run=False))
-    rc_module.reclassify_asset(db, client, None, make_cfg(), "a1", job_id=7)
+    result = reclassify_asset(db, client, None, make_cfg(), "a1", job_id=2)
 
+    assert result.status == "error"
+    assert client.untagged == []
+
+
+def _record_tag_add(db, asset_id, name, *, tag_id=None):
+    payload = {"tag_name": name}
+    if tag_id:
+        payload["tag_id"] = tag_id
     with db.connect() as conn:
-        rows = conn.execute(
-            "SELECT action, direction, job_id, payload FROM change_log "
-            "WHERE asset_id='a1'").fetchall()
-    removes = [r for r in rows if r["action"] == "tag_remove"]
+        conn.execute(
+            "INSERT INTO change_log (asset_id, action, direction, payload) "
+            "VALUES (?, 'tag_add', 'apply', ?)", (asset_id, json.dumps(payload)),
+        )
+
+
+def _llm_reply(content):
+    return SimpleNamespace(chat=lambda messages: SimpleNamespace(content=content, model="m", usage=None))
+
+
+def test_replaces_only_confirmed_owned_tags_after_valid_classification(db):
+    insert_tag(db, "风景")
+    insert_tag(db, "天空", "marker")
+    seed_state(db, "a1", manual_override=1, last_job_id=3)
+    _record_tag_add(db, "a1", "风景", tag_id="id-风景")
+    # The mirror says "天空", but no successful Tagger write is recorded.
+    client = FakeClient(owned_tags=("风景", "天空", "我的手打标签"))
+
+    result = reclassify_asset(
+        db, client, _llm_reply('{"tag":"人像","confidence":0.9}'),
+        make_cfg(), "a1", job_id=7,
+    )
+
+    assert result.status == "ok"
+    assert set(client.owned) == {"人像", "天空", "我的手打标签"}
+    assert client.untagged == [("id-风景", ["a1"])]
+    with db.connect() as conn:
+        removes = conn.execute(
+            "SELECT action, direction, job_id, payload FROM change_log WHERE action='tag_remove'"
+        ).fetchall()
+        row = conn.execute(
+            "SELECT current_tag, last_job_id, manual_override FROM asset_state WHERE asset_id='a1'"
+        ).fetchone()
     assert len(removes) == 1
     assert removes[0]["direction"] == "apply"
     assert removes[0]["job_id"] == 7
     assert json.loads(removes[0]["payload"])["tag_name"] == "风景"
+    assert tuple(row) == ("人像", 7, 1)
 
 
-def test_state_cleared_and_last_job_id_updated(db, monkeypatch):
-    insert_tag(db, "风景")
-    seed_state(db, "a1", manual_override=1, last_job_id=3)
+def test_reclassify_preserves_existing_tags_when_new_output_is_invalid(db):
+    seed_state(db, "a1", last_job_id=3)
+    _record_tag_add(db, "a1", "风景")
     client = FakeClient(owned_tags=("风景",))
-    monkeypatch.setattr(rc_module, "classify_asset",
-                        lambda *a, **k: PipelineResult(
-                            asset_id="a1", tag="x", confidence=None,
-                            markers=(), status="ok", dry_run=False))
-    rc_module.reclassify_asset(db, client, None, make_cfg(), "a1", job_id=7)
 
+    result = reclassify_asset(
+        db, client, _llm_reply('{"tag":"missing","confidence":0.9}'),
+        make_cfg(), "a1", job_id=7,
+    )
+
+    assert result.status == "error"
+    assert client.owned == ["风景"]
     with db.connect() as conn:
-        row = conn.execute(
-            "SELECT current_tag, current_markers, last_job_id, manual_override "
-            "FROM asset_state WHERE asset_id='a1'").fetchone()
-    assert row["current_tag"] is None
-    assert json.loads(row["current_markers"] or "[]") == []
-    assert row["last_job_id"] == 7
-    assert row["manual_override"] == 1  # 重分类不动该位（§5.5）
+        row = conn.execute("SELECT current_tag,last_job_id FROM asset_state").fetchone()
+        latest = conn.execute("SELECT apply_status FROM asset_records WHERE job_id=7").fetchone()
+    assert tuple(row) == ("风景", 3)
+    assert latest["apply_status"] != "pending"
+
+
+def test_reclassify_calls_model_when_previous_analysis_is_unapplied(db):
+    seed_state(db, "a1", last_job_id=3)
+    _record_tag_add(db, "a1", "风景")
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO asset_records (asset_id, source, status, predicted_tag, confidence) "
+            "VALUES ('a1','poll','ok','风景',0.9)"
+        )
+    client = FakeClient(owned_tags=("风景",))
+
+    result = reclassify_asset(
+        db, client, _llm_reply('{"tag":"人像","confidence":0.9}'),
+        make_cfg(), "a1", job_id=7,
+    )
+
+    assert result.tag == "人像"
+    assert "人像" in client.owned and "风景" not in client.owned
+
+
+def test_reclassify_preserves_a_same_name_tag_recreated_while_model_runs(db):
+    _record_tag_add(db, "a1", "风景", tag_id="id-风景")
+    client = FakeClient(owned_tags=("风景",))
+
+    def chat(messages):
+        client.tag_ids["风景"] = "replacement"
+        return SimpleNamespace(content='{"tag":"人像","confidence":0.9}', model="m", usage=None)
+
+    result = reclassify_asset(db, client, SimpleNamespace(chat=chat), make_cfg(), "a1", job_id=7)
+
+    assert result.status == "ok"
+    assert "风景" in client.owned
+    assert client.untagged == []
+
+
+def test_reclassify_keeps_an_existing_manual_metadata_marker(db):
+    marker = "保留人工信息"
+    _record_tag_add(db, "a1", marker, tag_id=f"id-{marker}")
+    client = FakeClient(owned_tags=("风景", marker), rating=5)
+    result = reclassify_asset(
+        db, client, _llm_reply('{"tag":"风景","confidence":0.9,"rating":3}'),
+        make_cfg(), "a1", job_id=7,
+    )
+
+    assert result.status == "ok"
+    assert marker in client.owned
+    assert marker in result.markers
+    assert client.untagged == []
 
 
 def test_classify_called_with_manual_source_and_no_override(db, monkeypatch):
@@ -182,6 +251,8 @@ def test_classify_called_with_manual_source_and_no_override(db, monkeypatch):
     assert captured["source"] == "manual"
     assert captured["job_id"] == 7
     assert captured["override_manual"] is False
+    assert captured["force_reanalysis"] is True
+    assert captured["lease_held"] is True
 
 
 def test_owned_empty_means_no_untag_no_changelog(db, monkeypatch):
@@ -204,43 +275,6 @@ def test_owned_empty_means_no_untag_no_changelog(db, monkeypatch):
         ).fetchone()["c"]
     assert n == 0
     assert called == [1]
-
-
-def test_reclassify_runs_real_classify_asset_without_typeerror(
-    db, monkeypatch
-):
-    """真实 classify_asset（含 apply 阶段）跑通；kwarg 形参不匹配必须
-    TypeError（BUG-1 回归）。"""
-    from app.store.connections import LLMConn
-    from app.classify.thumb import ThumbConfig
-
-    insert_tag(db, "风景")
-    seed_state(db, "a1", manual_override=1)
-    client = FakeClient(owned_tags=("风景",))
-
-    cfg = PipelineConfig(
-        prompt_template="t {{TAG_LIST}}", tags=[], marker_rules=[],
-        fallback_tag="other", default_min_confidence=0.6,
-        thumb=ThumbConfig(), queue_tag_name="未分类",
-        llm=LLMConn(base_url="http://llm", api_key="k", model="m",
-                    timeout=30, multimodal=False),
-        concurrency_owner=1,
-    )
-    llm = SimpleNamespace(
-        chat=lambda messages: SimpleNamespace(
-            content='{"tag": "风景", "confidence": 0.9, '
-                    '"sensitive": false, "reason": "ok"}',
-            model="m", usage=None),
-    )
-    result = rc_module.reclassify_asset(db, client, llm, cfg, "a1", job_id=7)
-    assert result.status == "ok"  # 不再 TypeError
-
-    # apply 阶段真的执行了（未被 except 吞掉）：change_log 有本 job 的 tag_add
-    with db.connect() as conn:
-        rows = conn.execute(
-            "SELECT action FROM change_log WHERE job_id = 7 "
-            "AND action IN ('tag_add', 'queue_remove')").fetchall()
-    assert any(r["action"] == "tag_add" for r in rows)
 
 
 def test_reclassify_refreshes_our_own_rating(db):

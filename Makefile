@@ -16,15 +16,22 @@ TAILWIND_VERSION := v3.4.17
 # --mount=type=cache 挂载点，重复 build 命中缓存不再下载。
 # 文件名带版本号：升级 TAILWIND_VERSION 会拉取新文件，旧版本缓存仍可复用。
 TAILWIND_CACHE_DIR ?= ./bin
-TAILWIND_BIN := $(TAILWIND_CACHE_DIR)/tailwindcss-$(TAILWIND_VERSION)
+TAILWIND_ARCH ?= $(shell uname -m)
+TAILWIND_ASSET_x86_64 := linux-x64
+TAILWIND_ASSET_amd64 := linux-x64
+TAILWIND_ASSET_aarch64 := linux-arm64
+TAILWIND_ASSET_arm64 := linux-arm64
+TAILWIND_ASSET := $(TAILWIND_ASSET_$(TAILWIND_ARCH))
+TAILWIND_BIN := $(TAILWIND_CACHE_DIR)/tailwindcss-$(TAILWIND_VERSION)-$(TAILWIND_ASSET)
 
 css: $(TAILWIND_BIN)
 	$(TAILWIND_BIN) -i app/web/static/input.css -o app/web/static/tailwind.css --minify
 
 $(TAILWIND_BIN):
+	$(if $(TAILWIND_ASSET),,$(error Unsupported Tailwind architecture: $(TAILWIND_ARCH)))
 	mkdir -p $(TAILWIND_CACHE_DIR)
 	curl -fsSL -o $@.tmp \
-	  https://github.com/tailwindlabs/tailwindcss/releases/download/$(TAILWIND_VERSION)/tailwindcss-linux-x64
+	  https://github.com/tailwindlabs/tailwindcss/releases/download/$(TAILWIND_VERSION)/tailwindcss-$(TAILWIND_ASSET)
 	mv $@.tmp $@
 	chmod +x $@
 

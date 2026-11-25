@@ -142,8 +142,8 @@ def test_commit_result_reports_only_committed(db, fake_client):
 
     fake_client.fail_on = None
     ok = _commit(db, fake_client, job_id=2)
-    assert {e.action for e in ok.committed} == {
-        "tag_add", "rating_set", "description_set", "queue_remove"}
+    assert {e.action for e in ok.committed} == {"tag_add", "queue_remove"}
+    assert _actions(db).count("rating_set") == 1
 
 
 def test_queue_effect_is_not_an_effect_action():
