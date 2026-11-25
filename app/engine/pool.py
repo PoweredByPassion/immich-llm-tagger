@@ -70,19 +70,25 @@ class WorkerPool:
     def _worker(self) -> None:
         db = Database(self._db_path)  # 线程内独立连接
         while not self._stop.is_set():
-            job = jobs.claim_next(db)
-            if job is None:
-                self._stop.wait(self._poll_seconds)
-                continue
             try:
-                # 每 job 现建：独立连接对象 + 连接配置热生效。
-                client = self._client_factory(db)
-                llm = self._llm_factory(db)
-                self._executor(db, client, llm, job,
-                               on_scan_split=self._on_scan_split)
-            except Exception as exc:  # noqa: BLE001 —— 执行器异常不能杀死 worker
-                events.log_event(db, "system", "job_error", {
-                    "job_id": job.id, "job_type": job.type,
-                    "error": f"worker: {exc}",
-                })
-                jobs.finish_job(db, job.id, error=str(exc))
+                job = jobs.claim_next(db)
+                if job is None:
+                    self._stop.wait(self._poll_seconds)
+                    continue
+                try:
+                    # 每 job 现建：独立连接对象 + 连接配置热生效。
+                    client = self._client_factory(db)
+                    llm = self._llm_factory(db)
+                    self._executor(db, client, llm, job,
+                                   on_scan_split=self._on_scan_split)
+                except Exception as exc:  # noqa: BLE001 —— 执行器异常不能杀死 worker
+                    try:
+                        events.log_event(db, "system", "job_error", {
+                            "job_id": job.id, "job_type": job.type,
+                            "error": f"worker: {exc}",
+                        })
+                    except Exception:  # noqa: BLE001, S110
+                        pass
+                    jobs.finish_job(db, job.id, error=str(exc))
+            except Exception:  # noqa: BLE001 —— 任何 DB 错误都不能杀死 worker
+                self._stop.wait(self._poll_seconds)

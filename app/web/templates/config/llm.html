@@ -2,9 +2,10 @@
 {% block title %}{{ tr("config.nav.llm") }} - Immich LLM Tagger{% endblock %}
 {% block page_title %}{{ tr("config.nav.llm") }}{% endblock %}
 {% block content %}
-<div class="max-w-4xl space-y-6">
+<div class="space-y-6">
   {% include "config/_tabs.html" %}
 
+  <div class="max-w-4xl space-y-6">
   <div>
     <h1 class="text-xl font-semibold tracking-tight text-[#f1f3f9]">{{ tr("config.tabs.sub_llm") }}</h1>
     <p class="text-xs text-zinc-400 mt-1">{{ tr("config.llm.desc") }}</p>
@@ -118,6 +119,7 @@
     </div>
 
     <div id="test-result"></div>
+  </div>
   </div>
 </div>
 

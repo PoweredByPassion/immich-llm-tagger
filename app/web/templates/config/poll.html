@@ -2,9 +2,10 @@
 {% block title %}{{ tr("config.poll.title") }} - Immich LLM Tagger{% endblock %}
 {% block page_title %}{{ tr("config.poll.title") }}{% endblock %}
 {% block content %}
-<div class="max-w-4xl space-y-6">
+<div class="space-y-6">
   {% include "config/_tabs.html" %}
 
+  <div class="max-w-4xl space-y-6">
   <div>
     <h1 class="text-xl font-semibold tracking-tight text-[#f1f3f9]">{{ tr("config.tabs.recognition") }}</h1>
     <p class="text-xs text-zinc-400 mt-1">{{ tr("config.poll.desc") }}</p>
@@ -98,6 +99,7 @@
         </button>
       </div>
     </form>
+  </div>
   </div>
 </div>
 {% endblock %}
